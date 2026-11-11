@@ -15,8 +15,10 @@ import com.modelplant.theseus.vision.ScreenshotService;
 import com.modelplant.theseus.world.WorldEditService;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
@@ -41,6 +43,11 @@ public final class BuiltinTools {
         registry.register(playerBreakBlock());
         registry.register(playerPlaceBlock());
         registry.register(playerUseItem());
+        registry.register(playerSelectHotbar());
+        registry.register(playerOpenInventory());
+        registry.register(playerDropItem());
+        registry.register(playerInteractBlock());
+        registry.register(getInventory());
         registry.register(worldSetBlock());
         registry.register(worldFill());
         registry.register(possessEntity());
@@ -411,6 +418,175 @@ public final class BuiltinTools {
         };
     }
 
+    private static Tool playerSelectHotbar() {
+        return new Tool() {
+            @Override
+            public ToolSchema schema() {
+                JsonObject props = objectProps();
+                props.add("slot", numberProp("Hotbar slot 0-8"));
+                props.add("item", stringProp("Optional item id (e.g. minecraft:torch); finds and selects/picks into hotbar"));
+                props.add("target_player", stringProp("Optional player name/UUID to control"));
+                return new ToolSchema("player_select_hotbar",
+                        "Switch the player's held hotbar slot, or pick an inventory item into the hotbar",
+                        objectSchema(props));
+            }
+
+            @Override
+            public String capability() {
+                return "control";
+            }
+
+            @Override
+            public ToolResult execute(ToolContext context) {
+                ServerPlayer target = resolveControlTarget(context);
+                if (target == null) {
+                    return ToolResult.error("Cannot control target player");
+                }
+                Integer slot = context.hasArg("slot") ? context.argInt("slot", 0) : null;
+                return PlayerController.get().selectHotbar(target, slot, context.argString("item", null));
+            }
+        };
+    }
+
+    private static Tool playerOpenInventory() {
+        return new Tool() {
+            @Override
+            public ToolSchema schema() {
+                JsonObject props = objectProps();
+                props.add("target_player", stringProp("Optional player name/UUID to control"));
+                return new ToolSchema("player_open_inventory",
+                        "Open the player's inventory GUI on their client",
+                        objectSchema(props));
+            }
+
+            @Override
+            public String capability() {
+                return "control";
+            }
+
+            @Override
+            public ToolResult execute(ToolContext context) {
+                ServerPlayer target = resolveControlTarget(context);
+                if (target == null) {
+                    return ToolResult.error("Cannot control target player");
+                }
+                return PlayerController.get().openInventory(target);
+            }
+        };
+    }
+
+    private static Tool playerDropItem() {
+        return new Tool() {
+            @Override
+            public ToolSchema schema() {
+                JsonObject props = objectProps();
+                props.add("slot", numberProp("Inventory slot (default = selected hotbar)"));
+                props.add("count", numberProp("How many to drop (default 1; ignored if all=true)"));
+                props.add("all", boolProp("Drop the entire stack"));
+                props.add("target_player", stringProp("Optional player name/UUID to control"));
+                return new ToolSchema("player_drop_item",
+                        "Drop items from the selected hotbar slot or a specific inventory slot",
+                        objectSchema(props));
+            }
+
+            @Override
+            public String capability() {
+                return "control";
+            }
+
+            @Override
+            public ToolResult execute(ToolContext context) {
+                ServerPlayer target = resolveControlTarget(context);
+                if (target == null) {
+                    return ToolResult.error("Cannot control target player");
+                }
+                Integer slot = context.hasArg("slot") ? context.argInt("slot", 0) : null;
+                return PlayerController.get().dropItem(
+                        target,
+                        slot,
+                        context.argInt("count", 1),
+                        context.argBool("all", false));
+            }
+        };
+    }
+
+    private static Tool playerInteractBlock() {
+        return new Tool() {
+            @Override
+            public ToolSchema schema() {
+                JsonObject props = objectProps();
+                props.add("x", numberProp("X"));
+                props.add("y", numberProp("Y"));
+                props.add("z", numberProp("Z"));
+                props.add("face", stringProp("Hit face: up|down|north|south|east|west (default up)"));
+                props.add("hand", stringProp("main or off (default main)"));
+                props.add("sneak", boolProp("Sneak / secondary use while interacting"));
+                props.add("target_player", stringProp("Optional player name/UUID to control"));
+                return new ToolSchema("player_interact_block",
+                        "Right-click / use item on a block (chests, doors, buttons, use-on, etc.)",
+                        objectSchema(props, "x", "y", "z"));
+            }
+
+            @Override
+            public String capability() {
+                return "control";
+            }
+
+            @Override
+            public ToolResult execute(ToolContext context) {
+                ServerPlayer target = resolveControlTarget(context);
+                if (target == null) {
+                    return ToolResult.error("Cannot control target player");
+                }
+                BlockPos blockPos = pos(context);
+                if (!withinRadius(target, blockPos)) {
+                    return ToolResult.error("Outside radius");
+                }
+                Direction face = parseDirection(context.argString("face", "up"));
+                if (face == null) {
+                    return ToolResult.error("Invalid face; use up|down|north|south|east|west");
+                }
+                InteractionHand hand = parseHand(context.argString("hand", "main"));
+                if (hand == null) {
+                    return ToolResult.error("Invalid hand; use main or off");
+                }
+                return PlayerController.get().interactBlock(
+                        target,
+                        blockPos,
+                        face,
+                        hand,
+                        context.argBool("sneak", false));
+            }
+        };
+    }
+
+    private static Tool getInventory() {
+        return new Tool() {
+            @Override
+            public ToolSchema schema() {
+                JsonObject props = objectProps();
+                props.add("hotbar_only", boolProp("Only list hotbar slots 0-8"));
+                props.add("include_empty", boolProp("Include empty slots"));
+                return new ToolSchema("get_inventory",
+                        "List the controlling player's inventory contents",
+                        objectSchema(props));
+            }
+
+            @Override
+            public String capability() {
+                return "read";
+            }
+
+            @Override
+            public ToolResult execute(ToolContext context) {
+                return PlayerController.get().inventorySnapshot(
+                        context.player(),
+                        context.argBool("hotbar_only", false),
+                        context.argBool("include_empty", false));
+            }
+        };
+    }
+
     private static Tool worldSetBlock() {
         return new Tool() {
             @Override
@@ -593,6 +769,32 @@ public final class BuiltinTools {
     private static boolean withinRadius(ServerPlayer player, BlockPos pos) {
         double max = TheseusServerConfig.MAX_ACTION_RADIUS.getAsInt();
         return player.position().distanceToSqr(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5) <= max * max;
+    }
+
+    private static Direction parseDirection(String face) {
+        if (face == null || face.isBlank()) {
+            return Direction.UP;
+        }
+        return switch (face.trim().toLowerCase(Locale.ROOT)) {
+            case "up", "top" -> Direction.UP;
+            case "down", "bottom" -> Direction.DOWN;
+            case "north" -> Direction.NORTH;
+            case "south" -> Direction.SOUTH;
+            case "east" -> Direction.EAST;
+            case "west" -> Direction.WEST;
+            default -> null;
+        };
+    }
+
+    private static InteractionHand parseHand(String hand) {
+        if (hand == null || hand.isBlank()) {
+            return InteractionHand.MAIN_HAND;
+        }
+        return switch (hand.trim().toLowerCase(Locale.ROOT)) {
+            case "main", "mainhand", "main_hand" -> InteractionHand.MAIN_HAND;
+            case "off", "offhand", "off_hand" -> InteractionHand.OFF_HAND;
+            default -> null;
+        };
     }
 
     private static JsonObject objectProps() {

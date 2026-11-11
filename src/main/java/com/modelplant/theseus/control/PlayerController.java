@@ -1,13 +1,21 @@
 package com.modelplant.theseus.control;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import com.modelplant.theseus.api.tool.ToolResult;
 import com.modelplant.theseus.network.PlayerControlPayload;
 import com.modelplant.theseus.network.TheseusNetwork;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.protocol.game.ClientboundSetCarriedItemPacket;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.context.BlockPlaceContext;
 import net.minecraft.world.level.Level;
@@ -17,7 +25,9 @@ import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
 import java.util.Iterator;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -107,6 +117,235 @@ public final class PlayerController {
         }
         var result = stack.use(player.level(), player, InteractionHand.MAIN_HAND);
         return ToolResult.ok("Used item: " + result.getResult());
+    }
+
+    public ToolResult selectHotbar(ServerPlayer player, Integer slot, String itemId) {
+        Inventory inventory = player.getInventory();
+        if (itemId != null && !itemId.isBlank()) {
+            Optional<Item> item = resolveItem(itemId);
+            if (item.isEmpty()) {
+                return ToolResult.error("Unknown item: " + itemId);
+            }
+            int found = findSlotMatchingItem(inventory, item.get());
+            if (found < 0) {
+                return ToolResult.error("Item not in inventory: " + itemId);
+            }
+            if (Inventory.isHotbarSlot(found)) {
+                return setSelectedSlot(player, found);
+            }
+            inventory.pickSlot(found);
+            player.inventoryMenu.broadcastChanges();
+            syncSelectedSlot(player);
+            JsonObject data = selectedSlotData(player);
+            return ToolResult.ok("Picked " + itemId + " into hotbar slot " + inventory.selected, data);
+        }
+        if (slot == null) {
+            return ToolResult.error("Provide slot (0-8) or item id");
+        }
+        if (!Inventory.isHotbarSlot(slot)) {
+            return ToolResult.error("Hotbar slot must be 0-8");
+        }
+        return setSelectedSlot(player, slot);
+    }
+
+    public ToolResult openInventory(ServerPlayer player) {
+        TheseusNetwork.sendToPlayer(player,
+                new PlayerControlPayload(PlayerControlPayload.Action.OPEN_INVENTORY, 0, 0, 0, 0, 0, false));
+        return ToolResult.ok("Requested client inventory screen");
+    }
+
+    public ToolResult dropItem(ServerPlayer player, Integer slot, int count, boolean all) {
+        Inventory inventory = player.getInventory();
+        int targetSlot = slot == null ? inventory.selected : slot;
+        if (targetSlot < 0 || targetSlot >= inventory.getContainerSize()) {
+            return ToolResult.error("Invalid inventory slot: " + targetSlot);
+        }
+        ItemStack stack = inventory.getItem(targetSlot);
+        if (stack.isEmpty()) {
+            return ToolResult.error("Slot " + targetSlot + " is empty");
+        }
+
+        int removeCount;
+        if (all || count <= 0) {
+            removeCount = stack.getCount();
+        } else {
+            removeCount = Math.min(count, stack.getCount());
+        }
+
+        ItemStack dropped;
+        if (slot == null && (all || count <= 0 || count >= stack.getCount())) {
+            // Prefer vanilla selected-slot drop path when dropping the whole selected stack.
+            boolean ok = player.drop(true);
+            if (!ok) {
+                return ToolResult.error("Drop cancelled");
+            }
+            JsonObject data = new JsonObject();
+            data.addProperty("slot", inventory.selected);
+            data.addProperty("dropped", removeCount);
+            return ToolResult.ok("Dropped selected stack (" + removeCount + ")", data);
+        }
+
+        if (slot == null && removeCount == 1) {
+            boolean ok = player.drop(false);
+            if (!ok) {
+                return ToolResult.error("Drop cancelled");
+            }
+            JsonObject data = new JsonObject();
+            data.addProperty("slot", inventory.selected);
+            data.addProperty("dropped", 1);
+            return ToolResult.ok("Dropped 1 item from selected slot", data);
+        }
+
+        dropped = inventory.removeItem(targetSlot, removeCount);
+        if (dropped.isEmpty()) {
+            return ToolResult.error("Nothing removed from slot " + targetSlot);
+        }
+        String itemKey = BuiltInRegistries.ITEM.getKey(dropped.getItem()).toString();
+        int droppedCount = dropped.getCount();
+        var entity = player.drop(dropped, false);
+        if (entity == null) {
+            // Toss cancelled: put the stack back if still present.
+            if (!dropped.isEmpty()) {
+                ItemStack existing = inventory.getItem(targetSlot);
+                if (existing.isEmpty()) {
+                    inventory.setItem(targetSlot, dropped);
+                } else {
+                    inventory.add(dropped);
+                }
+            }
+            player.inventoryMenu.broadcastChanges();
+            return ToolResult.error("Drop cancelled");
+        }
+        player.inventoryMenu.broadcastChanges();
+        JsonObject data = new JsonObject();
+        data.addProperty("slot", targetSlot);
+        data.addProperty("item", itemKey);
+        data.addProperty("dropped", droppedCount);
+        return ToolResult.ok("Dropped " + droppedCount + "x " + itemKey, data);
+    }
+
+    public ToolResult interactBlock(ServerPlayer player, BlockPos pos, Direction face, InteractionHand hand, boolean sneak) {
+        Level level = player.level();
+        BlockState state = level.getBlockState(pos);
+        if (state.isAir()) {
+            return ToolResult.error("No block at " + pos.toShortString());
+        }
+
+        Direction hitFace = face == null ? Direction.UP : face;
+        Vec3 hit = Vec3.atCenterOf(pos).add(
+                hitFace.getStepX() * 0.5,
+                hitFace.getStepY() * 0.5,
+                hitFace.getStepZ() * 0.5
+        );
+        BlockHitResult blockHit = new BlockHitResult(hit, hitFace, pos, false);
+        ItemStack stack = player.getItemInHand(hand);
+
+        boolean wasShift = player.isShiftKeyDown();
+        try {
+            player.setShiftKeyDown(sneak);
+            InteractionResult result = player.gameMode.useItemOn(player, level, stack, hand, blockHit);
+            JsonObject data = new JsonObject();
+            data.addProperty("x", pos.getX());
+            data.addProperty("y", pos.getY());
+            data.addProperty("z", pos.getZ());
+            data.addProperty("face", hitFace.getSerializedName());
+            data.addProperty("hand", hand.name().toLowerCase(Locale.ROOT));
+            data.addProperty("sneak", sneak);
+            data.addProperty("block", BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
+            data.addProperty("result", result.toString());
+            if (result.consumesAction()) {
+                return ToolResult.ok("Interacted with block: " + result, data);
+            }
+            return ToolResult.ok("Interact returned " + result + " (may be PASS/FAIL)", data);
+        } finally {
+            player.setShiftKeyDown(wasShift);
+        }
+    }
+
+    public ToolResult inventorySnapshot(ServerPlayer player, boolean hotbarOnly, boolean includeEmpty) {
+        Inventory inventory = player.getInventory();
+        JsonArray slots = new JsonArray();
+        int limit = hotbarOnly ? 9 : inventory.items.size();
+        for (int i = 0; i < limit; i++) {
+            ItemStack stack = inventory.getItem(i);
+            if (!includeEmpty && stack.isEmpty()) {
+                continue;
+            }
+            JsonObject slot = new JsonObject();
+            slot.addProperty("slot", i);
+            slot.addProperty("hotbar", Inventory.isHotbarSlot(i));
+            slot.addProperty("selected", i == inventory.selected);
+            if (stack.isEmpty()) {
+                slot.addProperty("empty", true);
+            } else {
+                slot.addProperty("item", BuiltInRegistries.ITEM.getKey(stack.getItem()).toString());
+                slot.addProperty("count", stack.getCount());
+                slot.addProperty("name", stack.getHoverName().getString());
+            }
+            slots.add(slot);
+        }
+
+        ItemStack offhand = inventory.offhand.get(0);
+        JsonObject data = new JsonObject();
+        data.addProperty("selectedSlot", inventory.selected);
+        data.add("slots", slots);
+        if (!offhand.isEmpty() || includeEmpty) {
+            JsonObject off = new JsonObject();
+            off.addProperty("slot", 40);
+            off.addProperty("empty", offhand.isEmpty());
+            if (!offhand.isEmpty()) {
+                off.addProperty("item", BuiltInRegistries.ITEM.getKey(offhand.getItem()).toString());
+                off.addProperty("count", offhand.getCount());
+                off.addProperty("name", offhand.getHoverName().getString());
+            }
+            data.add("offhand", off);
+        }
+        return ToolResult.okJson(data);
+    }
+
+    private static ToolResult setSelectedSlot(ServerPlayer player, int slot) {
+        player.getInventory().selected = slot;
+        syncSelectedSlot(player);
+        TheseusNetwork.sendToPlayer(player,
+                new PlayerControlPayload(PlayerControlPayload.Action.SELECT, slot, 0, 0, 0, 0, false));
+        return ToolResult.ok("Selected hotbar slot " + slot, selectedSlotData(player));
+    }
+
+    private static void syncSelectedSlot(ServerPlayer player) {
+        player.connection.send(new ClientboundSetCarriedItemPacket(player.getInventory().selected));
+    }
+
+    private static JsonObject selectedSlotData(ServerPlayer player) {
+        Inventory inventory = player.getInventory();
+        ItemStack stack = inventory.getSelected();
+        JsonObject data = new JsonObject();
+        data.addProperty("selectedSlot", inventory.selected);
+        if (!stack.isEmpty()) {
+            data.addProperty("item", BuiltInRegistries.ITEM.getKey(stack.getItem()).toString());
+            data.addProperty("count", stack.getCount());
+            data.addProperty("name", stack.getHoverName().getString());
+        } else {
+            data.addProperty("empty", true);
+        }
+        return data;
+    }
+
+    private static Optional<Item> resolveItem(String itemId) {
+        ResourceLocation id = ResourceLocation.tryParse(itemId.contains(":") ? itemId : "minecraft:" + itemId);
+        if (id == null || !BuiltInRegistries.ITEM.containsKey(id)) {
+            return Optional.empty();
+        }
+        return Optional.of(BuiltInRegistries.ITEM.get(id));
+    }
+
+    private static int findSlotMatchingItem(Inventory inventory, Item item) {
+        for (int i = 0; i < inventory.items.size(); i++) {
+            ItemStack stack = inventory.getItem(i);
+            if (!stack.isEmpty() && stack.is(item)) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     public void onServerTick(ServerTickEvent.Post event) {

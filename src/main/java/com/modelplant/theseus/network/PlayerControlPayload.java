@@ -45,6 +45,6 @@ public record PlayerControlPayload(
     }
 
     public enum Action {
-        MOVE, LOOK, BREAK, PLACE, USE
+        MOVE, LOOK, BREAK, PLACE, USE, SELECT, OPEN_INVENTORY
     }
 }

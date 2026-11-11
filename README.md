@@ -62,7 +62,7 @@ API Key 保存在 `config/theseus/apikeys.json`（Base64 混淆，不进世界�
 | `/theseus tools` | 列出当前可见工具 |
 | `/theseus providers` | 列出 LLM Provider |
 | `/theseus local list\|status\|download\|use` | 本地模型目录 / 下载 / 启用 |
-| `/theseus config show\|provider\|model\|key\|url\|ollama` | 配置（切换 provider 自动切 URL） |
+| `/theseus config show\|provider\|model\|key\|url\|ollama\|iterations` | 配置（切换 provider 自动切 URL；`iterations` 设置每轮最大工具调用次数 1–32） |
 | `/theseus mcp start\|stop` | MCP 桥开关 |
 | `/theseus status` | 运行状态 |
 

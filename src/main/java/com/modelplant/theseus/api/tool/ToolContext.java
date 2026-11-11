@@ -42,6 +42,10 @@ public final class ToolContext {
         return gateContext;
     }
 
+    public boolean hasArg(String key) {
+        return arguments.has(key) && !arguments.get(key).isJsonNull();
+    }
+
     public String argString(String key, String fallback) {
         return arguments.has(key) && arguments.get(key).isJsonPrimitive()
                 ? arguments.get(key).getAsString()

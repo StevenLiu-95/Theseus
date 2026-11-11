@@ -19,6 +19,7 @@ import com.modelplant.theseus.session.AiSession;
 import com.modelplant.theseus.session.AiSessionManager;
 import com.modelplant.theseus.session.ChatOrchestrator;
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
@@ -127,7 +128,13 @@ public final class TheseusCommands {
                                         .then(Commands.argument("value", StringArgumentType.greedyString())
                                                 .executes(ctx -> setKey(ctx.getSource(),
                                                         StringArgumentType.getString(ctx, "provider"),
-                                                        StringArgumentType.getString(ctx, "value")))))));
+                                                        StringArgumentType.getString(ctx, "value"))))))
+                        .then(Commands.literal("iterations")
+                                .requires(src -> src.hasPermission(2))
+                                .executes(ctx -> showIterations(ctx.getSource()))
+                                .then(Commands.argument("value", IntegerArgumentType.integer(1, 32))
+                                        .executes(ctx -> setIterations(ctx.getSource(),
+                                                IntegerArgumentType.getInteger(ctx, "value"))))));
 
         dispatcher.register(root);
     }
@@ -141,7 +148,7 @@ public final class TheseusCommands {
                 /theseus providers
                 /theseus status
                 /theseus local list|status|download|use
-                /theseus config show|provider|model|key|url|ollama
+                /theseus config show|provider|model|key|url|ollama|iterations
                 /theseus mcp start|stop
                 GUI: Ctrl+Alt+H
                 """.trim()), false);
@@ -285,7 +292,21 @@ public final class TheseusCommands {
                 + " anthropic=" + TheseusServerConfig.ANTHROPIC_BASE_URL.get()
                 + " gemini=" + TheseusServerConfig.GEMINI_BASE_URL.get()
                 + " ollama=" + TheseusServerConfig.OLLAMA_BASE_URL.get()
+                + " maxToolIterations=" + TheseusServerConfig.MAX_TOOL_ITERATIONS.getAsInt()
                 + " caps=" + String.join(",", TheseusServerConfig.enabledCapabilities())), false);
+        return 1;
+    }
+
+    private static int showIterations(CommandSourceStack source) {
+        source.sendSuccess(() -> Component.literal(
+                "maxToolIterations=" + TheseusServerConfig.MAX_TOOL_ITERATIONS.getAsInt()
+                        + " (range 1-32)"), false);
+        return 1;
+    }
+
+    private static int setIterations(CommandSourceStack source, int value) {
+        TheseusServerConfig.MAX_TOOL_ITERATIONS.set(value);
+        source.sendSuccess(() -> Component.literal("maxToolIterations set to " + value), true);
         return 1;
     }
 
