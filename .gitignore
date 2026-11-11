@@ -1,0 +1,59 @@
+### Gradle ###
+.gradle
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/**/build/
+
+### IntelliJ IDEA ###
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+!**/src/**/out/
+
+.run/
+
+### Eclipse ###
+.apt_generated
+.classpath
+.eclipse/
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+bin/
+!**/src/**/bin/
+
+### VS Code ###
+.vscode/
+
+### Mac OS ###
+.DS_Store
+
+### Minecraft Modding ###
+run/
+!**/src/**/run/
+**/src/generated/**/.cache/
+repo/
+!**/src/**/repo/
+
+### Theseus secrets ###
+apikeys.json
+**/apikeys.json
+runs/**/config/theseus/
+temp-mdk/
+
+### Local NeoForged/Mojang Maven cache (large; regenerated via scripts/vendor-and-build.ps1) ###
+local-maven/
+*.log
+nfr.pom
+md.pom
+md.module
+md-meta.xml
+md-list.html
+gradle-*.log
+vendor-build*.log
+compile-fix.log
+build-final.log

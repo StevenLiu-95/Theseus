@@ -1,0 +1,21 @@
+// Prefer local vendored NeoForged/Mojang artifacts. Avoid BMCLAPI HTTPS from Gradle JVM
+// (proxy MITM breaks TLS). Artifacts are populated into local-maven via curl+proxy.
+allprojects {
+    repositories {
+        maven {
+            name = "theseusLocal"
+            url = uri("${rootProject.projectDir}/local-maven")
+        }
+        mavenCentral()
+    }
+
+    repositories.whenObjectAdded { repo ->
+        if (repo instanceof MavenArtifactRepository) {
+            def url = repo.url?.toString() ?: ""
+            if (url.contains("libraries.minecraft.net") || url.contains("maven.neoforged.net") || url.contains("bmclapi") || url.contains("parchmentmc.org")) {
+                repo.setUrl(uri("${rootProject.projectDir}/local-maven"))
+                println "[theseus-mirror] ${url} -> local-maven"
+            }
+        }
+    }
+}
