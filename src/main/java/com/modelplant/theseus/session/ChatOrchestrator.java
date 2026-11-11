@@ -64,7 +64,8 @@ public final class ChatOrchestrator {
             apiKey = "ollama";
         }
         if (!"mock".equals(providerId) && !"ollama".equals(providerId) && (apiKey == null || apiKey.isBlank())) {
-            tell(player, "No API key for provider '" + providerId + "'. Use /theseus config key <provider> <key>");
+            tell(player, "No API key for provider '" + providerId
+                    + "'. Use /theseus config api <provider> <model> <key>");
             return;
         }
 

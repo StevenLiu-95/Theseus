@@ -55,7 +55,7 @@ public final class TheseusServerConfig {
 
     public static final ModConfigSpec.IntValue MAX_TOOL_ITERATIONS = BUILDER
             .comment("Max tool-call rounds per user message")
-            .defineInRange("maxToolIterations", 8, 1, 32);
+            .defineInRange("maxToolIterations", 100, 1, 256);
 
     public static final ModConfigSpec.ConfigValue<List<? extends String>> ENABLED_CAPABILITIES = BUILDER
             .comment("Enabled tool capability flags")

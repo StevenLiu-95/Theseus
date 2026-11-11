@@ -38,10 +38,13 @@ NeoForge 1.21.1 模组：将 LLM 与外部 Agent（MCP）接入 Minecraft，通�
    - `/theseus chat hello`
    - `/theseus chat TOOL get_player_info`
    - `/theseus chat TOOL echo {"message":"hi"}`
-3. 切换真实模型（需 OP；`provider` / `model` / `key` 支持 Tab 补全）：
-   - `/theseus config provider openai`（补全：mock / ollama / openai / deepseek / qwen / anthropic / gemini）
-   - `/theseus config model gpt-4o-mini`（按当前 provider 补全推荐模型名）
-   - `/theseus config key openai sk-...`
+3. 切换真实模型（需 OP；支持 Tab 补全）：
+   - 一条指令同时配置服务商、模型、密钥：
+     `/theseus config api deepseek deepseek-chat sk-...`
+   - 或分步：`provider` / `model` / `key`
+     - `/theseus config provider openai`
+     - `/theseus config model gpt-4o-mini`
+     - `/theseus config key openai sk-...`
 4. 或下载并启用本地模型（需本机安装 [Ollama](https://ollama.com)）：
    - `/theseus local list`
    - `/theseus local download qwen3-8b`
@@ -62,7 +65,8 @@ API Key 保存在 `config/theseus/apikeys.json`（Base64 混淆，不进世界�
 | `/theseus tools` | 列出当前可见工具 |
 | `/theseus providers` | 列出 LLM Provider |
 | `/theseus local list\|status\|download\|use` | 本地模型目录 / 下载 / 启用 |
-| `/theseus config show\|provider\|model\|key\|url\|ollama\|iterations` | 配置（切换 provider 自动切 URL；`iterations` 设置每轮最大工具调用次数 1–32） |
+| `/theseus config api <provider> <model> <key>` | 一条指令同时设置服务商、模型、API Key（自动切 URL） |
+| `/theseus config show\|provider\|model\|key\|url\|ollama\|iterations` | 分项配置；`iterations` 设置每轮最大工具调用次数 1–256（默认 100） |
 | `/theseus mcp start\|stop` | MCP 桥开关 |
 | `/theseus status` | 运行状态 |
 

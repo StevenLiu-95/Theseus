@@ -76,6 +76,9 @@ public record ChatMessage(
             obj.add("content", contentArr);
         } else if (content != null) {
             obj.addProperty("content", content);
+        } else if (toolCalls != null && !toolCalls.isEmpty()) {
+            // Some OpenAI-compatible gateways (e.g. DeepSeek) expect an explicit content field.
+            obj.add("content", com.google.gson.JsonNull.INSTANCE);
         }
         if (toolCalls != null && !toolCalls.isEmpty()) {
             JsonArray arr = new JsonArray();

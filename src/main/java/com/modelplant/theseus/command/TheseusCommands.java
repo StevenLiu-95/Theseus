@@ -53,6 +53,15 @@ public final class TheseusCommands {
     private static final SuggestionProvider<CommandSourceStack> CONFIG_MODEL_SUGGESTIONS = (ctx, builder) ->
             SharedSuggestionProvider.suggest(SuggestedModels.forActiveProvider(), builder);
 
+    private static final SuggestionProvider<CommandSourceStack> CONFIG_API_MODEL_SUGGESTIONS = (ctx, builder) -> {
+        String provider = "mock";
+        try {
+            provider = StringArgumentType.getString(ctx, "provider");
+        } catch (IllegalArgumentException ignored) {
+        }
+        return SharedSuggestionProvider.suggest(SuggestedModels.forProvider(provider), builder);
+    };
+
     private TheseusCommands() {
     }
 
@@ -94,6 +103,16 @@ public final class TheseusCommands {
                         .then(Commands.literal("stop").executes(ctx -> mcpStop(ctx.getSource()))))
                 .then(Commands.literal("config")
                         .then(Commands.literal("show").executes(ctx -> configShow(ctx.getSource())))
+                        .then(Commands.literal("api")
+                                .requires(src -> src.hasPermission(2))
+                                .then(Commands.argument("provider", StringArgumentType.word())
+                                        .suggests(PROVIDER_SUGGESTIONS)
+                                        .then(Commands.argument("model_and_key", StringArgumentType.greedyString())
+                                                .suggests(CONFIG_API_MODEL_SUGGESTIONS)
+                                                .executes(ctx -> setApiFromArgs(
+                                                        ctx.getSource(),
+                                                        StringArgumentType.getString(ctx, "provider"),
+                                                        StringArgumentType.getString(ctx, "model_and_key"))))))
                         .then(Commands.literal("provider")
                                 .requires(src -> src.hasPermission(2))
                                 .then(Commands.argument("id", StringArgumentType.word())
@@ -132,7 +151,7 @@ public final class TheseusCommands {
                         .then(Commands.literal("iterations")
                                 .requires(src -> src.hasPermission(2))
                                 .executes(ctx -> showIterations(ctx.getSource()))
-                                .then(Commands.argument("value", IntegerArgumentType.integer(1, 32))
+                                .then(Commands.argument("value", IntegerArgumentType.integer(1, 256))
                                         .executes(ctx -> setIterations(ctx.getSource(),
                                                 IntegerArgumentType.getInteger(ctx, "value"))))));
 
@@ -148,7 +167,8 @@ public final class TheseusCommands {
                 /theseus providers
                 /theseus status
                 /theseus local list|status|download|use
-                /theseus config show|provider|model|key|url|ollama|iterations
+                /theseus config show|api|provider|model|key|url|ollama|iterations
+                /theseus config api <provider> <model> <key>
                 /theseus mcp start|stop
                 GUI: Ctrl+Alt+H
                 """.trim()), false);
@@ -300,7 +320,7 @@ public final class TheseusCommands {
     private static int showIterations(CommandSourceStack source) {
         source.sendSuccess(() -> Component.literal(
                 "maxToolIterations=" + TheseusServerConfig.MAX_TOOL_ITERATIONS.getAsInt()
-                        + " (range 1-32)"), false);
+                        + " (range 1-256)"), false);
         return 1;
     }
 
@@ -336,6 +356,55 @@ public final class TheseusCommands {
                 : " | models: " + String.join(", ", models.stream().limit(6).toList());
         source.sendSuccess(() -> Component.literal(
                 "Provider set to " + providerId + " | url=" + url + modelHint), true);
+        return 1;
+    }
+
+    /**
+     * Parses {@code /theseus config api <provider> <model> <key>} where model may contain
+     * characters like {@code :} (e.g. {@code qwen3:8b}). First token after provider is model;
+     * the remainder of the line is the API key.
+     */
+    private static int setApiFromArgs(CommandSourceStack source, String provider, String modelAndKey) {
+        String raw = modelAndKey == null ? "" : modelAndKey.trim();
+        if (raw.isBlank()) {
+            source.sendFailure(Component.literal("Usage: /theseus config api <provider> <model> <key>"));
+            return 0;
+        }
+        int split = raw.indexOf(' ');
+        if (split <= 0 || split >= raw.length() - 1) {
+            source.sendFailure(Component.literal("Usage: /theseus config api <provider> <model> <key>"));
+            return 0;
+        }
+        String model = raw.substring(0, split).trim();
+        String key = raw.substring(split + 1).trim();
+        return setApi(source, provider, model, key);
+    }
+
+    private static int setApi(CommandSourceStack source, String provider, String model, String key) {
+        final String providerId = provider.toLowerCase(Locale.ROOT);
+        if (LlmProviderRegistry.get().get(providerId).isEmpty()) {
+            source.sendFailure(Component.literal("Unknown provider: " + providerId));
+            return 0;
+        }
+        if (model == null || model.isBlank()) {
+            source.sendFailure(Component.literal("Model name required"));
+            return 0;
+        }
+        if (key == null || key.isBlank()) {
+            source.sendFailure(Component.literal("API key required"));
+            return 0;
+        }
+
+        TheseusServerConfig.PROVIDER_ID.set(providerId);
+        TheseusServerConfig.MODEL.set(model.trim());
+        ApiKeyStore.set(providerId, key.trim());
+
+        String url = ProviderEndpoints.resolve(providerId);
+        source.sendSuccess(() -> Component.literal(
+                "API configured: provider=" + providerId
+                        + " model=" + TheseusServerConfig.MODEL.get()
+                        + " key=set"
+                        + " url=" + url), true);
         return 1;
     }
 
