@@ -4,8 +4,10 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.modelplant.theseus.config.PlayerLlmSettings;
 import com.modelplant.theseus.config.TheseusServerConfig;
 import com.modelplant.theseus.llm.HttpClients;
+import com.modelplant.theseus.llm.ProviderEndpoints;
 
 import java.io.BufferedReader;
 import java.io.InputStream;
@@ -28,21 +30,29 @@ public final class OllamaClient {
     }
 
     public static String apiBase() {
-        String base = TheseusServerConfig.OLLAMA_BASE_URL.get();
-        if (base.endsWith("/")) {
-            base = base.substring(0, base.length() - 1);
-        }
-        return base;
+        return apiBase(null);
+    }
+
+    public static String apiBase(PlayerLlmSettings settings) {
+        return ProviderEndpoints.ollamaNativeBase(settings);
     }
 
     public static String openAiBase() {
-        return apiBase() + "/v1";
+        return openAiBase(null);
+    }
+
+    public static String openAiBase(PlayerLlmSettings settings) {
+        return ProviderEndpoints.openAiCompatibleBase("ollama", settings);
     }
 
     public static boolean isReachable() {
+        return isReachable(null);
+    }
+
+    public static boolean isReachable(PlayerLlmSettings settings) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(apiBase() + "/api/tags"))
+                    .uri(URI.create(apiBase(settings) + "/api/tags"))
                     .timeout(Duration.ofSeconds(5))
                     .GET()
                     .build();
@@ -54,8 +64,12 @@ public final class OllamaClient {
     }
 
     public static List<String> listInstalledModelNames() throws Exception {
+        return listInstalledModelNames(null);
+    }
+
+    public static List<String> listInstalledModelNames(PlayerLlmSettings settings) throws Exception {
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(apiBase() + "/api/tags"))
+                .uri(URI.create(apiBase(settings) + "/api/tags"))
                 .timeout(Duration.ofSeconds(TheseusServerConfig.REQUEST_TIMEOUT_SECONDS.getAsInt()))
                 .GET()
                 .build();
@@ -76,8 +90,12 @@ public final class OllamaClient {
     }
 
     public static boolean isInstalled(String ollamaName) throws Exception {
+        return isInstalled(ollamaName, null);
+    }
+
+    public static boolean isInstalled(String ollamaName, PlayerLlmSettings settings) throws Exception {
         String target = ollamaName.toLowerCase(Locale.ROOT);
-        for (String name : listInstalledModelNames()) {
+        for (String name : listInstalledModelNames(settings)) {
             if (name.equalsIgnoreCase(ollamaName) || name.toLowerCase(Locale.ROOT).equals(target)) {
                 return true;
             }
@@ -89,12 +107,16 @@ public final class OllamaClient {
      * Pull a model; streams NDJSON progress lines from Ollama.
      */
     public static void pull(String ollamaName, Consumer<PullProgress> onProgress) throws Exception {
+        pull(ollamaName, null, onProgress);
+    }
+
+    public static void pull(String ollamaName, PlayerLlmSettings settings, Consumer<PullProgress> onProgress) throws Exception {
         JsonObject body = new JsonObject();
         body.addProperty("name", ollamaName);
         body.addProperty("stream", true);
 
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(apiBase() + "/api/pull"))
+                .uri(URI.create(apiBase(settings) + "/api/pull"))
                 .timeout(Duration.ofHours(TheseusServerConfig.OLLAMA_PULL_TIMEOUT_HOURS.getAsInt()))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body.toString()))

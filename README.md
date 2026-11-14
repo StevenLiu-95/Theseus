@@ -12,11 +12,27 @@ NeoForge 1.21.1 模组：将 LLM 与外部 Agent（MCP）接入 Minecraft，通�
 
 需要 **JDK 21**。
 
+日常出包（增量、保留 Daemon、**不要** `clean`）：
+
+```powershell
+powershell -File scripts/fast-jar.ps1
+```
+
+等价命令：
+
+```bash
+./gradlew jar --init-script init.gradle
+```
+
+产物：`build/libs/theseus-0.1.0.jar`
+
+完整校验构建：
+
 ```bash
 ./gradlew build --init-script init.gradle
 ```
 
-产物：`build/libs/theseus-0.1.0.jar`
+仅在怀疑缓存损坏时再 `./gradlew clean jar --init-script init.gradle`。
 
 开发运行：
 
@@ -31,6 +47,8 @@ NeoForge 1.21.1 模组：将 LLM 与外部 Agent（MCP）接入 Minecraft，通�
 2. 运行 `powershell -File scripts/vendor-and-build.ps1` 将依赖填充到 `local-maven/`
 3. 之后用 `--init-script init.gradle` 走本地缓存构建
 
+构建加速说明：`gradle.properties` 将 NFRT launcher meta 指向 BMCLAPI，并启用 Eclipse 并行重编译；NeoForge 相关坐标通过 `exclusiveContent` 只查 `local-maven`，避免弱网下远端仓库探测挂起。
+
 ## 快速开始 / 验收
 
 1. 进入世界后执行 `/theseus help`
@@ -38,7 +56,7 @@ NeoForge 1.21.1 模组：将 LLM 与外部 Agent（MCP）接入 Minecraft，通�
    - `/theseus chat hello`
    - `/theseus chat TOOL get_player_info`
    - `/theseus chat TOOL echo {"message":"hi"}`
-3. 切换真实模型（需 OP；支持 Tab 补全）：
+3. 切换真实模型（**对本玩家生效**；能用 Theseus 即可配置，支持 Tab 补全）：
    - 一条指令同时配置服务商、模型、密钥：
      `/theseus config api deepseek deepseek-chat sk-...`
    - 或分步：`provider` / `model` / `key`
@@ -54,19 +72,22 @@ NeoForge 1.21.1 模组：将 LLM 与外部 Agent（MCP）接入 Minecraft，通�
 
 **Mock 冒烟清单**：`help` → `tools` → `chat hello` → `chat TOOL get_player_info` → `chat TOOL echo {"message":"hi"}` 均应有回包。
 
-API Key 保存在 `config/theseus/apikeys.json`（Base64 混淆，不进世界存档）。
+**按玩家隔离**：provider / model / API Key / iterations / 自定义 URL 存于 `config/theseus/players/<uuid>.json`（跨存档；玩家之间互不共享）。服务端策略与新玩家默认值在 `config/theseus-common.toml`。旧版全局 `apikeys.json` 会在首次进服时迁入该玩家配置。
 
 ## 指令一览
 
 | 指令 | 说明 |
 |------|------|
 | `/theseus chat\|say <msg>` | 与 AI 对话 |
+| `/theseus cancel\|stop` | 中止当前正在进行的回复 / 工具循环 |
 | `/theseus session new\|clear\|status` | 会话管理 |
 | `/theseus tools` | 列出当前可见工具 |
 | `/theseus providers` | 列出 LLM Provider |
 | `/theseus local list\|status\|download\|use` | 本地模型目录 / 下载 / 启用 |
-| `/theseus config api <provider> <model> <key>` | 一条指令同时设置服务商、模型、API Key（自动切 URL） |
-| `/theseus config show\|provider\|model\|key\|url\|ollama\|iterations` | 分项配置；`iterations` 设置每轮最大工具调用次数 1–256（默认 100） |
+| `/theseus config api <provider> <model> <key>` | 为本玩家设置服务商、模型、API Key |
+| `/theseus verbose [on\|off\|default]` | 对本玩家开关详细聊天（思考 / 工具调用 / 模型 / Token）；默认跟随服务端 `verboseChat` |
+| `/theseus config show\|provider\|model\|key\|url\|ollama\|iterations` | 本玩家分项配置；`iterations` 1–256；`url`/`ollama` 可覆盖默认 Base URL |
+| `/theseus config verbose` | OP：服务端 verbose 默认值 |
 | `/theseus mcp start\|stop` | MCP 桥开关 |
 | `/theseus status` | 运行状态 |
 
@@ -84,7 +105,7 @@ API Key 保存在 `config/theseus/apikeys.json`（Base64 混淆，不进世界�
 | `anthropic` | `https://api.anthropic.com` | Claude Messages API |
 | `gemini` | `https://generativelanguage.googleapis.com/v1beta` | Google Gemini |
 
-切换 `/theseus config provider <id>` 会自动使用该 Provider 自己的 URL。自定义：`/theseus config url <provider> <url>`（也可用 `config/theseus-server.toml` 里的 `openaiBaseUrl` / `deepseekBaseUrl` / `qwenBaseUrl` / `anthropicBaseUrl` / `geminiBaseUrl` / `ollamaBaseUrl`）。
+切换 `/theseus config provider <id>` 使用代码内置官方默认 URL。自定义中转：`/theseus config url <provider> <url>` 或 `/theseus config ollama <url>`（写入本玩家配置）。不同玩家互不影响。
 
 ## 本地模型（Ollama）
 
@@ -112,11 +133,16 @@ API Key 保存在 `config/theseus/apikeys.json`（Base64 混淆，不进世界�
 启用后默认监听 `http://127.0.0.1:8765`：
 
 - `GET /health`
-- `GET /mcp/tools?player=Steve`（`player` 可选；省略则返回未门控全量目录）
-- `POST /mcp/call` `{"tool":"get_player_info","arguments":{},"player":"Steve"}`（**`player` 必填**，禁止默认落到任意在线玩家）
-- `POST /mcp` JSON-RPC：`initialize` / `tools/list` / `tools/call`（`tools/call` 同样要求 `params.player`）
+- `GET /mcp/tools?player=Steve`（**`player` 必填**；返回对该玩家门控后的工具目录）
+- `POST /mcp/call` `{"tool":"get_player_info","arguments":{},"player":"Steve"}`（**`player` 必填**）
+- `POST /mcp` JSON-RPC：`initialize` / `tools/list` / `tools/call`（`tools/list` 与 `tools/call` 均要求 `params.player`）
 
-可选 Bearer Token：`mcpAuthToken`。MCP `tools/call` 会写入审计日志。
+安全：
+
+- 绑定非 loopback 且 `mcpAuthToken` 为空时 **拒绝启动**
+- loopback 空 token 仅打 WARN（本地开发）；生产请设置 Bearer Token：`Authorization: Bearer <token>`
+- MCP 工具调用与游戏内 chat **共用会话忙锁**（互斥）
+- MCP `tools/call` 写入审计日志
 
 Cursor 等外部 Agent 可把该桥当作 MCP/HTTP 工具后端。
 
@@ -138,13 +164,15 @@ Cursor 等外部 Agent 可把该桥当作 MCP/HTTP 工具后端。
 
 - `player_goto` 为简单直线导航 + 跳跃/上台阶，不是完整 A* / Baritone
 - OpenAI 兼容流式仅在**无 tool schema 的纯文本轮**启用；带工具调用时走非流式
-- 截图经网络传 PNG 字节（有大小上限）；过大时仅保留磁盘路径，vision 附件可能缺失
+- 截图磁盘为 PNG；网络超限时按 `screenshotJpegQuality` 尝试 JPEG，仍超限则仅保留路径（vision 附件可能缺失）
 - MCP SSE 仅为轻量 endpoint 通告，非完整双向 Streamable HTTP 会话
+- 玩家 API Key 存于 JSON（Base64 混淆非加密）；见 docs/API.md
 - 操控他人角色需要 OP（`TheseusPermissions.canControlPlayers`）
 
 ## 架构要点
 
 - 服务端权威执行世界变更
+- LLM 配置按玩家 UUID 持久化隔离；聊天只使用该玩家自己的 provider / key / URL
 - LLM/MCP I/O 在工作线程，回写经 `ServerTaskQueue`
 - 同一 ToolRegistry 服务游戏内对话、MCP、外部模组
 - 每轮对话经 Tool Gate 过滤工具 schema

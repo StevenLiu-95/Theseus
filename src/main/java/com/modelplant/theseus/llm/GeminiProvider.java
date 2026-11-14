@@ -8,9 +8,11 @@ import com.modelplant.theseus.api.llm.ChatMessage;
 import com.modelplant.theseus.api.llm.ChatRequest;
 import com.modelplant.theseus.api.llm.ChatResponse;
 import com.modelplant.theseus.api.llm.LlmProvider;
+import com.modelplant.theseus.api.llm.TokenUsage;
 import com.modelplant.theseus.api.llm.ToolCall;
 import com.modelplant.theseus.api.tool.ToolSchema;
 import com.modelplant.theseus.config.TheseusServerConfig;
+import com.modelplant.theseus.runtime.TheseusExecutors;
 
 import java.net.URI;
 import java.net.URLEncoder;
@@ -52,11 +54,11 @@ public final class GeminiProvider implements LlmProvider {
             } catch (Exception e) {
                 throw new RuntimeException("Gemini request failed: " + e.getMessage(), e);
             }
-        });
+        }, TheseusExecutors.workers());
     }
 
     private ChatResponse doChat(ChatRequest request, String apiKey) throws Exception {
-        String base = TheseusServerConfig.GEMINI_BASE_URL.get();
+        String base = request.effectiveBaseUrl(ProviderEndpoints.defaultUrl("gemini"));
         if (base.endsWith("/")) {
             base = base.substring(0, base.length() - 1);
         }
@@ -166,17 +168,24 @@ public final class GeminiProvider implements LlmProvider {
         JsonObject root = JsonParser.parseString(raw).getAsJsonObject();
         JsonArray candidates = root.getAsJsonArray("candidates");
         if (candidates == null || candidates.isEmpty()) {
-            return ChatResponse.text("");
+            return ChatResponse.text("").withUsage(parseUsage(root));
         }
         JsonObject content = candidates.get(0).getAsJsonObject().getAsJsonObject("content");
         JsonArray parts = content.getAsJsonArray("parts");
         StringBuilder text = new StringBuilder();
+        StringBuilder reasoning = new StringBuilder();
         List<ToolCall> toolCalls = new ArrayList<>();
         if (parts != null) {
             for (JsonElement el : parts) {
                 JsonObject part = el.getAsJsonObject();
+                boolean thought = part.has("thought") && part.get("thought").getAsBoolean();
                 if (part.has("text")) {
-                    text.append(part.get("text").getAsString());
+                    String piece = part.get("text").getAsString();
+                    if (thought) {
+                        reasoning.append(piece);
+                    } else {
+                        text.append(piece);
+                    }
                 }
                 if (part.has("functionCall")) {
                     JsonObject fc = part.getAsJsonObject("functionCall");
@@ -186,6 +195,24 @@ public final class GeminiProvider implements LlmProvider {
                 }
             }
         }
-        return new ChatResponse(text.toString(), toolCalls, toolCalls.isEmpty() ? "stop" : "tool_calls", raw);
+        return new ChatResponse(
+                text.toString(),
+                toolCalls,
+                toolCalls.isEmpty() ? "stop" : "tool_calls",
+                raw,
+                reasoning.toString(),
+                parseUsage(root)
+        );
+    }
+
+    static TokenUsage parseUsage(JsonObject root) {
+        if (root == null || !root.has("usageMetadata") || !root.get("usageMetadata").isJsonObject()) {
+            return TokenUsage.UNKNOWN;
+        }
+        JsonObject usage = root.getAsJsonObject("usageMetadata");
+        int prompt = usage.has("promptTokenCount") ? usage.get("promptTokenCount").getAsInt() : -1;
+        int completion = usage.has("candidatesTokenCount") ? usage.get("candidatesTokenCount").getAsInt() : -1;
+        int total = usage.has("totalTokenCount") ? usage.get("totalTokenCount").getAsInt() : -1;
+        return new TokenUsage(prompt, completion, total);
     }
 }

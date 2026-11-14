@@ -18,7 +18,8 @@
 - 默认危险工具需 OP（`requireOpForDangerous`）
 - 指令工具受 `commandWhitelist` + 权限等级约束
 - 审计日志：`logs/theseus/audit.log`
-- MCP 默认绑定 `127.0.0.1`，生产环境务必设置 `mcpAuthToken`
+- MCP 默认绑定 `127.0.0.1`；非 loopback 绑定必须设置 `mcpAuthToken`，否则拒绝启动
+- MCP 与游戏内对话共享每玩家会话锁，避免并行改世界
 
 ## 排查
 

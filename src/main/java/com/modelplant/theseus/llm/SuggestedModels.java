@@ -1,6 +1,5 @@
 package com.modelplant.theseus.llm;
 
-import com.modelplant.theseus.config.TheseusServerConfig;
 import com.modelplant.theseus.local.LocalModelCatalog;
 import com.modelplant.theseus.local.LocalModelSpec;
 
@@ -85,14 +84,10 @@ public final class SuggestedModels {
             out.addAll(BY_PROVIDER.getOrDefault(id, List.of()));
         }
 
-        String current = TheseusServerConfig.MODEL.get();
-        if (current != null && !current.isBlank()) {
-            out.add(current);
-        }
         return new ArrayList<>(out);
     }
 
-    public static List<String> forActiveProvider() {
-        return forProvider(TheseusServerConfig.PROVIDER_ID.get());
+    public static List<String> forActiveProvider(String providerId) {
+        return forProvider(providerId);
     }
 }

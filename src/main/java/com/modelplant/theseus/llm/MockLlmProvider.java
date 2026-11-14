@@ -6,6 +6,7 @@ import com.modelplant.theseus.api.llm.ChatMessage;
 import com.modelplant.theseus.api.llm.ChatRequest;
 import com.modelplant.theseus.api.llm.ChatResponse;
 import com.modelplant.theseus.api.llm.LlmProvider;
+import com.modelplant.theseus.api.llm.TokenUsage;
 import com.modelplant.theseus.api.llm.ToolCall;
 import com.modelplant.theseus.api.tool.ToolSchema;
 
@@ -59,11 +60,11 @@ public final class MockLlmProvider implements LlmProvider {
                 break;
             }
             if ("tool".equals(msg.role())) {
-                return ChatResponse.text("Tool result received: " + msg.content());
+                return withMockMeta(ChatResponse.text("Tool result received: " + msg.content()), 24, 18);
             }
         }
         if (lastUser == null || lastUser.content() == null) {
-            return ChatResponse.text("Mock provider online. Say something, or: TOOL echo {\"message\":\"hi\"}");
+            return withMockMeta(ChatResponse.text("Mock provider online. Say something, or: TOOL echo {\"message\":\"hi\"}"), 8, 20);
         }
 
         String text = lastUser.content().trim();
@@ -72,9 +73,12 @@ public final class MockLlmProvider implements LlmProvider {
             String name = matcher.group(1);
             String args = matcher.group(2) == null ? "{}" : matcher.group(2);
             if (hasTool(request.tools(), name)) {
-                return new ChatResponse(null, List.of(new ToolCall(idOf(name), name, args)), "tool_calls", text);
+                return withMockMeta(
+                        new ChatResponse(null, List.of(new ToolCall(idOf(name), name, args)), "tool_calls", text,
+                                "Mock deciding to call tool " + name, null),
+                        16, 12);
             }
-            return ChatResponse.text("Tool not available under current gate: " + name);
+            return withMockMeta(ChatResponse.text("Tool not available under current gate: " + name), 12, 10);
         }
 
         if (text.startsWith("{") && text.contains("\"tool\"")) {
@@ -83,7 +87,10 @@ public final class MockLlmProvider implements LlmProvider {
                 String name = obj.get("tool").getAsString();
                 String args = obj.has("arguments") ? obj.get("arguments").toString() : "{}";
                 if (hasTool(request.tools(), name)) {
-                    return new ChatResponse(null, List.of(new ToolCall(idOf(name), name, args)), "tool_calls", text);
+                    return withMockMeta(
+                            new ChatResponse(null, List.of(new ToolCall(idOf(name), name, args)), "tool_calls", text,
+                                    "Mock JSON tool directive for " + name, null),
+                            16, 12);
                 }
             } catch (Exception ignored) {
             }
@@ -92,11 +99,21 @@ public final class MockLlmProvider implements LlmProvider {
         String lower = text.toLowerCase(Locale.ROOT);
         if (lower.contains("player info") || lower.contains("who am i") || lower.contains("我是谁")) {
             if (hasTool(request.tools(), "get_player_info")) {
-                return new ChatResponse(null, List.of(new ToolCall(idOf("get_player_info"), "get_player_info", "{}")), "tool_calls", text);
+                return withMockMeta(
+                        new ChatResponse(null, List.of(new ToolCall(idOf("get_player_info"), "get_player_info", "{}")),
+                                "tool_calls", text, "Mock inferred get_player_info from user text", null),
+                        14, 10);
             }
         }
 
-        return ChatResponse.text("Mock Theseus heard: " + text + "\nTip: TOOL get_player_info  or  TOOL echo {\"message\":\"hello\"}");
+        return withMockMeta(
+                ChatResponse.text("Mock Theseus heard: " + text + "\nTip: TOOL get_player_info  or  TOOL echo {\"message\":\"hello\"}")
+                        .withReasoning("Mock echo path; no tool needed"),
+                20, 28);
+    }
+
+    private static ChatResponse withMockMeta(ChatResponse response, int prompt, int completion) {
+        return response.withUsage(new TokenUsage(prompt, completion, prompt + completion));
     }
 
     private static boolean hasTool(List<ToolSchema> tools, String name) {

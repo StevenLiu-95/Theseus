@@ -1,56 +1,56 @@
 package com.modelplant.theseus.llm;
 
-import com.modelplant.theseus.config.TheseusServerConfig;
-import com.modelplant.theseus.local.OllamaClient;
-import net.neoforged.neoforge.common.ModConfigSpec;
+import com.modelplant.theseus.config.PlayerLlmSettings;
 
 import java.util.Locale;
 import java.util.Optional;
 
 /**
- * Per-provider API base URLs. Switching provider selects that provider's configured endpoint.
+ * Per-provider API base URLs. Built-in official defaults; players may override per provider.
  */
 public final class ProviderEndpoints {
     private ProviderEndpoints() {
     }
 
     public static String resolve(String providerId) {
+        return resolve(providerId, null);
+    }
+
+    public static String resolve(String providerId, PlayerLlmSettings settings) {
+        String id = normalize(providerId);
+        if (settings != null) {
+            String override = settings.urlOverride(id);
+            if (override != null) {
+                return normalizeUrl(override);
+            }
+        }
+        return defaultUrl(id);
+    }
+
+    public static String resolveActive(PlayerLlmSettings settings) {
+        if (settings == null) {
+            return defaultUrl("mock");
+        }
+        return resolve(settings.providerId(), settings);
+    }
+
+    public static boolean setUrl(PlayerLlmSettings settings, String providerId, String url) {
         String id = normalize(providerId);
         return switch (id) {
-            case "openai" -> normalizeUrl(TheseusServerConfig.OPENAI_BASE_URL.get());
-            case "deepseek" -> normalizeUrl(TheseusServerConfig.DEEPSEEK_BASE_URL.get());
-            case "qwen" -> normalizeUrl(TheseusServerConfig.QWEN_BASE_URL.get());
-            case "anthropic" -> normalizeUrl(TheseusServerConfig.ANTHROPIC_BASE_URL.get());
-            case "gemini" -> normalizeUrl(TheseusServerConfig.GEMINI_BASE_URL.get());
-            case "ollama" -> OllamaClient.openAiBase();
-            case "mock" -> "(offline)";
-            default -> "(unknown)";
+            case "openai", "deepseek", "qwen", "anthropic", "gemini", "ollama" -> {
+                settings.setUrlOverride(id, url == null || url.isBlank() ? null : normalizeUrl(url));
+                yield true;
+            }
+            default -> false;
         };
     }
 
-    public static String resolveActive() {
-        return resolve(TheseusServerConfig.PROVIDER_ID.get());
-    }
-
-    public static Optional<ModConfigSpec.ConfigValue<String>> urlConfig(String providerId) {
-        return switch (normalize(providerId)) {
-            case "openai" -> Optional.of(TheseusServerConfig.OPENAI_BASE_URL);
-            case "deepseek" -> Optional.of(TheseusServerConfig.DEEPSEEK_BASE_URL);
-            case "qwen" -> Optional.of(TheseusServerConfig.QWEN_BASE_URL);
-            case "anthropic" -> Optional.of(TheseusServerConfig.ANTHROPIC_BASE_URL);
-            case "gemini" -> Optional.of(TheseusServerConfig.GEMINI_BASE_URL);
-            case "ollama" -> Optional.of(TheseusServerConfig.OLLAMA_BASE_URL);
+    public static Optional<String> configurableProvidersHint(String providerId) {
+        String id = normalize(providerId);
+        return switch (id) {
+            case "openai", "deepseek", "qwen", "anthropic", "gemini", "ollama" -> Optional.of(defaultUrl(id));
             default -> Optional.empty();
         };
-    }
-
-    public static boolean setUrl(String providerId, String url) {
-        Optional<ModConfigSpec.ConfigValue<String>> config = urlConfig(providerId);
-        if (config.isEmpty()) {
-            return false;
-        }
-        config.get().set(normalizeUrl(url));
-        return true;
     }
 
     public static String defaultUrl(String providerId) {
@@ -79,5 +79,29 @@ public final class ProviderEndpoints {
             trimmed = trimmed.substring(0, trimmed.length() - 1);
         }
         return trimmed;
+    }
+
+    /** OpenAI-compatible chat base for ollama = native api + /v1 */
+    public static String openAiCompatibleBase(String providerId, PlayerLlmSettings settings) {
+        String id = normalize(providerId);
+        String base = resolve(id, settings);
+        if ("ollama".equals(id)) {
+            if (base.endsWith("/v1")) {
+                return base;
+            }
+            return base + "/v1";
+        }
+        return base;
+    }
+
+    public static String ollamaNativeBase(PlayerLlmSettings settings) {
+        String base = resolve("ollama", settings);
+        if (base.endsWith("/v1")) {
+            base = base.substring(0, base.length() - 3);
+            while (base.endsWith("/")) {
+                base = base.substring(0, base.length() - 1);
+            }
+        }
+        return base;
     }
 }

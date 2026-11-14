@@ -8,9 +8,11 @@ import com.modelplant.theseus.api.llm.ChatMessage;
 import com.modelplant.theseus.api.llm.ChatRequest;
 import com.modelplant.theseus.api.llm.ChatResponse;
 import com.modelplant.theseus.api.llm.LlmProvider;
+import com.modelplant.theseus.api.llm.TokenUsage;
 import com.modelplant.theseus.api.llm.ToolCall;
 import com.modelplant.theseus.api.tool.ToolSchema;
 import com.modelplant.theseus.config.TheseusServerConfig;
+import com.modelplant.theseus.runtime.TheseusExecutors;
 
 import java.net.URI;
 import java.net.http.HttpRequest;
@@ -50,11 +52,11 @@ public final class AnthropicProvider implements LlmProvider {
             } catch (Exception e) {
                 throw new RuntimeException("Anthropic request failed: " + e.getMessage(), e);
             }
-        });
+        }, TheseusExecutors.workers());
     }
 
     private ChatResponse doChat(ChatRequest request, String apiKey) throws Exception {
-        String base = TheseusServerConfig.ANTHROPIC_BASE_URL.get();
+        String base = request.effectiveBaseUrl(ProviderEndpoints.defaultUrl("anthropic"));
         if (base.endsWith("/")) {
             base = base.substring(0, base.length() - 1);
         }
@@ -168,6 +170,7 @@ public final class AnthropicProvider implements LlmProvider {
         JsonObject root = JsonParser.parseString(raw).getAsJsonObject();
         JsonArray content = root.getAsJsonArray("content");
         StringBuilder text = new StringBuilder();
+        StringBuilder reasoning = new StringBuilder();
         List<ToolCall> toolCalls = new ArrayList<>();
         if (content != null) {
             for (JsonElement el : content) {
@@ -175,6 +178,12 @@ public final class AnthropicProvider implements LlmProvider {
                 String type = block.get("type").getAsString();
                 if ("text".equals(type)) {
                     text.append(block.get("text").getAsString());
+                } else if ("thinking".equals(type) || "redacted_thinking".equals(type)) {
+                    if (block.has("thinking") && !block.get("thinking").isJsonNull()) {
+                        reasoning.append(block.get("thinking").getAsString());
+                    } else if (block.has("data") && !block.get("data").isJsonNull()) {
+                        reasoning.append(block.get("data").getAsString());
+                    }
                 } else if ("tool_use".equals(type)) {
                     String id = block.has("id") ? block.get("id").getAsString() : UUID.randomUUID().toString();
                     toolCalls.add(new ToolCall(id, block.get("name").getAsString(), block.get("input").toString()));
@@ -182,6 +191,17 @@ public final class AnthropicProvider implements LlmProvider {
             }
         }
         String stop = root.has("stop_reason") ? root.get("stop_reason").getAsString() : "end_turn";
-        return new ChatResponse(text.toString(), toolCalls, stop, raw);
+        return new ChatResponse(text.toString(), toolCalls, stop, raw, reasoning.toString(), parseUsage(root));
+    }
+
+    static TokenUsage parseUsage(JsonObject root) {
+        if (root == null || !root.has("usage") || !root.get("usage").isJsonObject()) {
+            return TokenUsage.UNKNOWN;
+        }
+        JsonObject usage = root.getAsJsonObject("usage");
+        int input = usage.has("input_tokens") ? usage.get("input_tokens").getAsInt() : -1;
+        int output = usage.has("output_tokens") ? usage.get("output_tokens").getAsInt() : -1;
+        int total = (input >= 0 && output >= 0) ? input + output : -1;
+        return new TokenUsage(input, output, total);
     }
 }

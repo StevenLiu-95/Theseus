@@ -1,8 +1,8 @@
 package com.modelplant.theseus.local;
 
 import com.modelplant.theseus.Theseus;
-import com.modelplant.theseus.config.ApiKeyStore;
-import com.modelplant.theseus.config.TheseusServerConfig;
+import com.modelplant.theseus.config.PlayerConfigStore;
+import com.modelplant.theseus.config.PlayerLlmSettings;
 import com.modelplant.theseus.llm.SuggestedModels;
 import com.modelplant.theseus.runtime.TheseusExecutors;
 import net.minecraft.network.chat.Component;
@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 /**
- * Download curated models via Ollama and activate them for in-game chat.
+ * Download curated models via Ollama and activate them for the calling player's chat config.
  */
 public final class LocalModelService {
     private static final AtomicBoolean DOWNLOAD_BUSY = new AtomicBoolean(false);
@@ -34,10 +34,14 @@ public final class LocalModelService {
     }
 
     public static String statusSummary() {
-        boolean up = OllamaClient.isReachable();
+        return statusSummary(null);
+    }
+
+    public static String statusSummary(PlayerLlmSettings settings) {
+        boolean up = OllamaClient.isReachable(settings);
         StringBuilder sb = new StringBuilder();
         sb.append("ollama=").append(up ? "online" : "offline")
-                .append(" url=").append(OllamaClient.apiBase());
+                .append(" url=").append(OllamaClient.apiBase(settings));
         if (isDownloading()) {
             sb.append(" downloading=").append(activeDownload());
         }
@@ -46,7 +50,7 @@ public final class LocalModelService {
             return sb.toString();
         }
         try {
-            List<String> installed = OllamaClient.listInstalledModelNames();
+            List<String> installed = OllamaClient.listInstalledModelNames(settings);
             SuggestedModels.updateOllamaInstalledCache(installed);
             sb.append(" installed=").append(installed.size());
             for (LocalModelSpec spec : LocalModelCatalog.all()) {
@@ -60,12 +64,16 @@ public final class LocalModelService {
     }
 
     public static String catalogListing() {
+        return catalogListing(null);
+    }
+
+    public static String catalogListing(PlayerLlmSettings settings) {
         StringBuilder sb = new StringBuilder("Curated local models:\n");
-        boolean up = OllamaClient.isReachable();
+        boolean up = OllamaClient.isReachable(settings);
         List<String> installed = List.of();
         if (up) {
             try {
-                installed = OllamaClient.listInstalledModelNames();
+                installed = OllamaClient.listInstalledModelNames(settings);
                 SuggestedModels.updateOllamaInstalledCache(installed);
             } catch (Exception ignored) {
             }
@@ -84,13 +92,14 @@ public final class LocalModelService {
     }
 
     public static void startDownload(MinecraftServer server, ServerPlayer player, String rawId) {
+        PlayerLlmSettings settings = PlayerConfigStore.get(player.getUUID());
         LocalModelSpec spec = LocalModelCatalog.resolve(rawId)
                 .orElseThrow(() -> new IllegalArgumentException(
                         "Unknown local model '" + rawId + "'. Try: "
                                 + LocalModelCatalog.all().stream().map(LocalModelSpec::id).collect(Collectors.joining(", "))));
 
-        if (!OllamaClient.isReachable()) {
-            throw new IllegalStateException("Ollama is offline at " + OllamaClient.apiBase()
+        if (!OllamaClient.isReachable(settings)) {
+            throw new IllegalStateException("Ollama is offline at " + OllamaClient.apiBase(settings)
                     + ". Install from https://ollama.com and start it, then retry.");
         }
         if (!DOWNLOAD_BUSY.compareAndSet(false, true)) {
@@ -105,7 +114,7 @@ public final class LocalModelService {
             try {
                 final long[] lastNotify = {0L};
                 final int[] lastPercent = {-1};
-                OllamaClient.pull(spec.ollamaName(), progress -> {
+                OllamaClient.pull(spec.ollamaName(), settings, progress -> {
                     long now = System.currentTimeMillis();
                     int pct = progress.percent();
                     boolean milestone = pct >= 0 && (pct >= lastPercent[0] + 10 || pct == 100);
@@ -122,7 +131,7 @@ public final class LocalModelService {
                     }
                 });
                 try {
-                    SuggestedModels.updateOllamaInstalledCache(OllamaClient.listInstalledModelNames());
+                    SuggestedModels.updateOllamaInstalledCache(OllamaClient.listInstalledModelNames(settings));
                 } catch (Exception ignored) {
                 }
                 tell(server, playerId, "Download complete: " + spec.ollamaName()
@@ -137,23 +146,26 @@ public final class LocalModelService {
         });
     }
 
-    public static String activate(String rawId) throws Exception {
+    public static String activate(ServerPlayer player, String rawId) throws Exception {
+        PlayerLlmSettings settings = PlayerConfigStore.get(player.getUUID());
         LocalModelSpec spec = LocalModelCatalog.resolve(rawId)
                 .orElseThrow(() -> new IllegalArgumentException("Unknown local model: " + rawId));
-        if (!OllamaClient.isReachable()) {
-            throw new IllegalStateException("Ollama is offline at " + OllamaClient.apiBase());
+        if (!OllamaClient.isReachable(settings)) {
+            throw new IllegalStateException("Ollama is offline at " + OllamaClient.apiBase(settings));
         }
-        if (!OllamaClient.isInstalled(spec.ollamaName())) {
+        if (!OllamaClient.isInstalled(spec.ollamaName(), settings)) {
             throw new IllegalStateException(spec.ollamaName()
                     + " is not downloaded. Run /theseus local download " + spec.id());
         }
 
-        TheseusServerConfig.PROVIDER_ID.set("ollama");
-        TheseusServerConfig.MODEL.set(spec.ollamaName());
-        if (!ApiKeyStore.hasKey("ollama")) {
-            ApiKeyStore.set("ollama", "ollama");
-        }
-        return "Active local model: provider=ollama model=" + spec.ollamaName()
+        PlayerConfigStore.update(player.getUUID(), prefs -> {
+            prefs.setProviderId("ollama");
+            prefs.setModel(spec.ollamaName());
+            if (!prefs.hasApiKey("ollama")) {
+                prefs.setApiKey("ollama", "ollama");
+            }
+        });
+        return "Active local model for you: provider=ollama model=" + spec.ollamaName()
                 + " (" + spec.displayName() + "). You can /theseus chat now.";
     }
 

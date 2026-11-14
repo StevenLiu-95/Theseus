@@ -4,8 +4,7 @@ import com.modelplant.theseus.Theseus;
 import com.modelplant.theseus.api.event.RegisterTheseusProvidersEvent;
 import com.modelplant.theseus.api.event.RegisterTheseusToolsEvent;
 import com.modelplant.theseus.command.TheseusCommands;
-import com.modelplant.theseus.config.ApiKeyStore;
-import com.modelplant.theseus.config.TheseusServerConfig;
+import com.modelplant.theseus.config.PlayerConfigStore;
 import com.modelplant.theseus.control.EntityPossessionManager;
 import com.modelplant.theseus.control.PlayerController;
 import com.modelplant.theseus.gate.BuiltinGateRules;
@@ -14,11 +13,12 @@ import com.modelplant.theseus.llm.GeminiProvider;
 import com.modelplant.theseus.llm.LlmProviderRegistry;
 import com.modelplant.theseus.llm.MockLlmProvider;
 import com.modelplant.theseus.llm.OpenAiCompatibleProvider;
-import com.modelplant.theseus.local.OllamaClient;
 import com.modelplant.theseus.mcp.McpBridgeServer;
 import com.modelplant.theseus.runtime.ServerTaskQueue;
 import com.modelplant.theseus.runtime.TheseusExecutors;
 import com.modelplant.theseus.session.AiSessionManager;
+import com.modelplant.theseus.session.ThinkingIndicator;
+import com.modelplant.theseus.session.VerboseChatPrefs;
 import com.modelplant.theseus.tool.TheseusToolRegistry;
 import com.modelplant.theseus.tool.builtin.BuiltinTools;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -40,7 +40,7 @@ public final class TheseusBootstrap {
             return;
         }
         initialized = true;
-        ApiKeyStore.init();
+        PlayerConfigStore.init();
         TheseusExecutors.init();
         BuiltinGateRules.registerDefaults();
 
@@ -50,30 +50,10 @@ public final class TheseusBootstrap {
 
         LlmProviderRegistry registry = LlmProviderRegistry.get();
         registry.register(new MockLlmProvider());
-        registry.register(new OpenAiCompatibleProvider(
-                "ollama",
-                "Ollama (local)",
-                false,
-                OllamaClient::openAiBase
-        ));
-        registry.register(new OpenAiCompatibleProvider(
-                "openai",
-                "OpenAI Compatible",
-                true,
-                TheseusServerConfig.OPENAI_BASE_URL::get
-        ));
-        registry.register(new OpenAiCompatibleProvider(
-                "deepseek",
-                "DeepSeek",
-                false,
-                TheseusServerConfig.DEEPSEEK_BASE_URL::get
-        ));
-        registry.register(new OpenAiCompatibleProvider(
-                "qwen",
-                "Qwen / DashScope",
-                true,
-                TheseusServerConfig.QWEN_BASE_URL::get
-        ));
+        registry.register(new OpenAiCompatibleProvider("ollama", "Ollama (local)", false));
+        registry.register(new OpenAiCompatibleProvider("openai", "OpenAI Compatible", true));
+        registry.register(new OpenAiCompatibleProvider("deepseek", "DeepSeek", false));
+        registry.register(new OpenAiCompatibleProvider("qwen", "Qwen / DashScope", true));
         registry.register(new AnthropicProvider());
         registry.register(new GeminiProvider());
         NeoForge.EVENT_BUS.post(new RegisterTheseusProvidersEvent(registry));
@@ -98,7 +78,10 @@ public final class TheseusBootstrap {
     public static void onServerStopping(ServerStoppingEvent event) {
         McpBridgeServer.stop();
         ServerTaskQueue.get().unbind();
+        ThinkingIndicator.clearAll();
+        VerboseChatPrefs.clearAll();
         AiSessionManager.get().clearAll();
+        TheseusExecutors.shutdown();
     }
 
     @SubscribeEvent
@@ -106,11 +89,20 @@ public final class TheseusBootstrap {
         ServerTaskQueue.get().onServerTick(event);
         PlayerController.get().onServerTick(event);
         EntityPossessionManager.get().onServerTick(event);
+        ThinkingIndicator.onServerTick(event.getServer());
+    }
+
+    @SubscribeEvent
+    public static void onLogin(PlayerEvent.PlayerLoggedInEvent event) {
+        if (event.getEntity() != null) {
+            PlayerConfigStore.maybeMigrateLegacyKeys(event.getEntity().getUUID());
+        }
     }
 
     @SubscribeEvent
     public static void onLogout(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() != null) {
+            ThinkingIndicator.clear(event.getEntity().getUUID());
             AiSessionManager.get().remove(event.getEntity().getUUID());
         }
     }

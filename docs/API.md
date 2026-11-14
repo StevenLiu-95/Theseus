@@ -40,8 +40,17 @@ TheseusAPI.registerGateRule(myRule);
 - `TheseusAPI.sessions()`：按玩家管理 AI 会话
 - `TheseusAPI.taskQueue()`：把任务投递到服务端主线程
 
+## 玩家 LLM 配置
+
+- `TheseusAPI.playerSettings(uuid)`：只读快照（provider / model / iterations / URL 覆盖等）
+- `TheseusAPI.playerHasApiKey(uuid, provider)`：是否已配置密钥
+- `TheseusAPI.playerApiKey(uuid, provider)`：明文密钥（**仅供受信扩展模组**；勿写入日志或二次持久化）
+
+配置文件：`config/theseus/players/<uuid>.json`。  
+文件中的 API Key 为 **Base64 混淆，不是加密**；任何能读服务器配置目录的进程都可还原。不要把该目录同步到公开仓库。
+
 ## 注意事项
 
 - 不要在工作线程直接改世界；使用 `ServerTaskQueue`
 - 高危能力应使用独立 capability，并尊重 OP / 配额配置
-- API Key 不通过 TheseusAPI 暴露明文读写接口（使用指令或本地配置文件）
+- 玩家之间不得共享或串用对方的 API Key

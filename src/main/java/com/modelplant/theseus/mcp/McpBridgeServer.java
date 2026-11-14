@@ -37,8 +37,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * Minimal MCP-compatible HTTP bridge exposing the same tool catalog as in-game AI.
  * Endpoints:
  * - GET  /health
- * - GET  /mcp/tools?player=<name|uuid>   (player optional; without it returns ungated catalog)
- * - POST /mcp/call   {"tool":"...", "arguments":{...}, "player":"<name|uuid>"}  // player required
+ * - GET  /mcp/tools?player=&lt;name|uuid&gt;   (player required; gated catalog)
+ * - POST /mcp/call   {"tool":"...", "arguments":{...}, "player":"&lt;name|uuid&gt;"}  // player required
  * - POST /mcp        JSON-RPC style initialize / tools/list / tools/call
  */
 public final class McpBridgeServer {
@@ -59,8 +59,23 @@ public final class McpBridgeServer {
             Theseus.LOGGER.info("MCP bridge disabled");
             return;
         }
+        String host = TheseusServerConfig.MCP_BIND_HOST.get();
+        String token = TheseusServerConfig.MCP_AUTH_TOKEN.get();
+        boolean tokenBlank = token == null || token.isBlank();
+        boolean loopback = McpBindHosts.isLoopback(host);
+        if (tokenBlank && !loopback) {
+            Theseus.LOGGER.error(
+                    "MCP bridge refused to start: bind host '{}' is not loopback and mcpAuthToken is empty. "
+                            + "Set mcpAuthToken or bind to 127.0.0.1.",
+                    host);
+            return;
+        }
+        if (tokenBlank) {
+            Theseus.LOGGER.warn(
+                    "MCP bridge starting on loopback without mcpAuthToken (dev only). "
+                            + "Set mcpAuthToken before exposing beyond this machine.");
+        }
         try {
-            String host = TheseusServerConfig.MCP_BIND_HOST.get();
             int port = TheseusServerConfig.MCP_PORT.getAsInt();
             HttpServer http = HttpServer.create(new InetSocketAddress(host, port), 0);
             McpBridgeServer bridge = new McpBridgeServer(http, server);
@@ -101,17 +116,17 @@ public final class McpBridgeServer {
             return;
         }
         String playerRef = queryParam(exchange, "player");
-        ServerPlayer player = null;
-        if (playerRef != null && !playerRef.isBlank()) {
-            player = resolvePlayerExact(playerRef);
-            if (player == null) {
-                writeJson(exchange, 404, obj("error", "Player not found or offline: " + playerRef));
-                return;
-            }
+        if (playerRef == null || playerRef.isBlank()) {
+            writeJson(exchange, 400, obj("error", "Missing required query parameter 'player' (name or UUID)"));
+            return;
         }
-        JsonArray tools = toolsFor(player);
+        ServerPlayer player = resolvePlayerExact(playerRef);
+        if (player == null) {
+            writeJson(exchange, 404, obj("error", "Player not found or offline: " + playerRef));
+            return;
+        }
         JsonObject root = new JsonObject();
-        root.add("tools", tools);
+        root.add("tools", toolsFor(player));
         writeJson(exchange, 200, root);
     }
 
@@ -181,17 +196,22 @@ public final class McpBridgeServer {
                 JsonObject params = req.has("params") && req.get("params").isJsonObject()
                         ? req.getAsJsonObject("params") : new JsonObject();
                 String playerRef = params.has("player") ? params.get("player").getAsString() : null;
-                ServerPlayer player = null;
-                if (playerRef != null && !playerRef.isBlank()) {
-                    player = resolvePlayerExact(playerRef);
-                    if (player == null) {
-                        JsonObject error = new JsonObject();
-                        error.addProperty("code", -32001);
-                        error.addProperty("message", "Player not found or offline: " + playerRef);
-                        response.add("error", error);
-                        writeJson(exchange, 200, response);
-                        return;
-                    }
+                if (playerRef == null || playerRef.isBlank()) {
+                    JsonObject error = new JsonObject();
+                    error.addProperty("code", -32602);
+                    error.addProperty("message", "Missing required params.player (name or UUID)");
+                    response.add("error", error);
+                    writeJson(exchange, 200, response);
+                    return;
+                }
+                ServerPlayer player = resolvePlayerExact(playerRef);
+                if (player == null) {
+                    JsonObject error = new JsonObject();
+                    error.addProperty("code", -32001);
+                    error.addProperty("message", "Player not found or offline: " + playerRef);
+                    response.add("error", error);
+                    writeJson(exchange, 200, response);
+                    return;
                 }
                 JsonObject result = new JsonObject();
                 result.add("tools", toolsFor(player));
@@ -235,41 +255,42 @@ public final class McpBridgeServer {
             return ToolResult.error("Player not found or offline: " + playerRef);
         }
         AiSession session = AiSessionManager.get().getOrCreate(player);
-        GateContext gate = new GateContext(
-                player,
-                session.id(),
-                TheseusServerConfig.enabledCapabilities(),
-                TheseusPermissions.isOperator(player),
-                true,
-                player.level().dimension(),
-                player.gameMode.getGameModeForPlayer()
-        );
-        boolean allowed = ToolGateEngine.get().filter(gate).stream().anyMatch(t -> t.name().equals(toolName));
-        if (!allowed) {
-            ToolResult denied = ToolResult.error("Tool gated/unavailable: " + toolName);
-            AuditLog.record(player, "mcp:" + toolName, args.toString(), denied);
-            return denied;
+        if (!session.tryAcquire()) {
+            return ToolResult.error("Session busy (in-game chat or another MCP call in progress). Retry later or cancel chat.");
         }
-        ToolCall call = new ToolCall("mcp_" + UUID.randomUUID(), toolName, args.toString());
         try {
-            ToolResult result = ToolExecutor.execute(player, session, call, gate).join();
-            AuditLog.record(player, "mcp:" + toolName, args.toString(), result);
-            return result;
-        } catch (Exception e) {
-            ToolResult err = ToolResult.error(e.getMessage());
-            AuditLog.record(player, "mcp:" + toolName, args.toString(), err);
-            return err;
+            GateContext gate = new GateContext(
+                    player,
+                    session.id(),
+                    TheseusServerConfig.enabledCapabilities(),
+                    TheseusPermissions.isOperator(player),
+                    true,
+                    player.level().dimension(),
+                    player.gameMode.getGameModeForPlayer()
+            );
+            boolean allowed = ToolGateEngine.get().filter(gate).stream().anyMatch(t -> t.name().equals(toolName));
+            if (!allowed) {
+                ToolResult denied = ToolResult.error("Tool gated/unavailable: " + toolName);
+                AuditLog.record(player, "mcp:" + toolName, args.toString(), denied);
+                return denied;
+            }
+            ToolCall call = new ToolCall("mcp_" + UUID.randomUUID(), toolName, args.toString());
+            try {
+                ToolResult result = ToolExecutor.execute(player, session, call, gate).join();
+                AuditLog.record(player, "mcp:" + toolName, args.toString(), result);
+                return result;
+            } catch (Exception e) {
+                ToolResult err = ToolResult.error(e.getMessage());
+                AuditLog.record(player, "mcp:" + toolName, args.toString(), err);
+                return err;
+            }
+        } finally {
+            session.release();
         }
     }
 
     private JsonArray toolsFor(ServerPlayer player) {
         JsonArray arr = new JsonArray();
-        if (player == null) {
-            for (Tool tool : com.modelplant.theseus.tool.TheseusToolRegistry.get().all()) {
-                arr.add(tool.schema().toMcpTool());
-            }
-            return arr;
-        }
         GateContext gate = new GateContext(
                 player,
                 UUID.randomUUID(),
@@ -343,7 +364,6 @@ public final class McpBridgeServer {
     private static void writeJson(HttpExchange exchange, int code, JsonObject body) throws IOException {
         byte[] bytes = GSON.toJson(body).getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
-        exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
         exchange.sendResponseHeaders(code, bytes.length);
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(bytes);

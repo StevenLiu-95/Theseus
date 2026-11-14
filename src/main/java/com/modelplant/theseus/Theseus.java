@@ -20,7 +20,9 @@ public final class Theseus {
     public Theseus(IEventBus modEventBus, ModContainer modContainer) {
         modEventBus.addListener(this::commonSetup);
         modEventBus.addListener(TheseusNetwork::register);
-        modContainer.registerConfig(ModConfig.Type.SERVER, TheseusServerConfig.SPEC);
+        // COMMON (config/theseus-common.toml): survives world switches. SERVER would be
+        // per-save / world-scoped and force re-configuring provider+model each entry.
+        modContainer.registerConfig(ModConfig.Type.COMMON, TheseusServerConfig.SPEC);
         NeoForge.EVENT_BUS.register(TheseusBootstrap.class);
     }
 
