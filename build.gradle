@@ -27,12 +27,35 @@ sourceSets.main.resources {
 }
 
 repositories {
-    // Local vendored NeoForged artifacts (for networks that cannot reach maven.neoforged.net)
-    maven { url = uri("${rootDir}/local-maven") }
-    // China-friendly mirrors first, then official NeoForged / Mojang repos.
-    maven { url = 'https://bmclapi2.bangbang93.com/' }
-    maven { url = 'https://bmclapi2.bangbang93.com/maven' }
-    maven { url = 'https://maven.neoforged.net/releases' }
+    // NeoForge ecosystem: local-maven first, then a single official fallback.
+    // exclusiveContent keeps these coords off mavenCentral / random mirrors (fast fail).
+    // Repo name theseusNeoForgeFallback is intentionally NOT rewritten by init.gradle.
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = 'theseusLocalExclusive'
+                url = uri("${rootDir}/local-maven")
+            }
+        }
+        forRepository {
+            maven {
+                name = 'theseusNeoForgeFallback'
+                url = 'https://maven.neoforged.net/releases'
+            }
+        }
+        filter {
+            includeGroupByRegex('net\\.neoforged(\\..*)?')
+            includeGroupByRegex('cpw\\.mods(\\..*)?')
+            includeGroup('net.minecraftforge')
+            includeGroupByRegex('org\\.parchmentmc(\\..*)?')
+            includeGroupByRegex('com\\.mojang(\\..*)?')
+            includeGroup('net.minecraft')
+        }
+    }
+    maven {
+        name = 'theseusLocal'
+        url = uri("${rootDir}/local-maven")
+    }
     mavenCentral()
 }
 
@@ -122,6 +145,10 @@ configurations {
 }
 
 dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testImplementation 'com.google.code.gson:gson:2.11.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
     // Example optional mod dependency with JEI
     // The JEI API is declared for compile time use, while the full JEI artifact is used at runtime
     // compileOnly "mezz.jei:jei-${mc_version}-common-api:${jei_version}"
@@ -143,6 +170,10 @@ dependencies {
     // For more info:
     // http://www.gradle.org/docs/current/userguide/artifact_dependencies_tutorial.html
     // http://www.gradle.org/docs/current/userguide/dependency_management.html
+}
+
+tasks.named('test', Test).configure {
+    useJUnitPlatform()
 }
 
 // This block of code expands all declared replace properties in the specified resource targets.

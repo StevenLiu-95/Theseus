@@ -1,5 +1,9 @@
-// Prefer local vendored NeoForged/Mojang artifacts. Avoid BMCLAPI HTTPS from Gradle JVM
-// (proxy MITM breaks TLS). Artifacts are populated into local-maven via curl+proxy.
+// Prefer local vendored NeoForged/Mojang *Maven* artifacts.
+// Avoid BMCLAPI HTTPS from Gradle JVM (proxy MITM breaks TLS).
+// Artifacts are populated into local-maven via curl+proxy (scripts/vendor-and-build.ps1).
+//
+// IMPORTANT: Do NOT rewrite neoForge.neoFormRuntime.launcherManifestUrl.
+// That BMCLAPI HTTP URL is used by NFRT directly (not as a Gradle Maven repo).
 allprojects {
     repositories {
         maven {
@@ -10,12 +14,27 @@ allprojects {
     }
 
     repositories.whenObjectAdded { repo ->
-        if (repo instanceof MavenArtifactRepository) {
-            def url = repo.url?.toString() ?: ""
-            if (url.contains("libraries.minecraft.net") || url.contains("maven.neoforged.net") || url.contains("bmclapi") || url.contains("parchmentmc.org")) {
-                repo.setUrl(uri("${rootProject.projectDir}/local-maven"))
-                println "[theseus-mirror] ${url} -> local-maven"
-            }
+        if (!(repo instanceof MavenArtifactRepository)) {
+            return
+        }
+        // Keep an explicit remote fallback for incomplete local-maven (see build.gradle).
+        if (repo.name == 'theseusNeoForgeFallback') {
+            return
+        }
+        def url = repo.url?.toString() ?: ""
+        // Only rewrite Maven artifact hosts — never version_manifest / piston-data URLs
+        // (neoForge.neoFormRuntime.launcherManifestUrl is NFRT HTTP, not a Maven repo).
+        def isMavenHost = url.contains("libraries.minecraft.net") ||
+                url.contains("maven.neoforged.net") ||
+                url.contains("bmclapi") ||
+                url.contains("parchmentmc.org")
+        def isLauncherMeta = url.contains("version_manifest") ||
+                url.contains("piston-meta") ||
+                url.contains("piston-data") ||
+                url.contains("/mc/game/")
+        if (isMavenHost && !isLauncherMeta) {
+            repo.setUrl(uri("${rootProject.projectDir}/local-maven"))
+            println "[theseus-mirror] ${url} -> local-maven"
         }
     }
 }

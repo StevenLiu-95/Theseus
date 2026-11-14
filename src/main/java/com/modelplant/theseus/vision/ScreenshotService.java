@@ -51,8 +51,9 @@ public final class ScreenshotService {
         data.addProperty("width", payload.width());
         data.addProperty("height", payload.height());
         data.addProperty("player", player.getGameProfile().getName());
-        data.addProperty("mime", "image/png");
-        byte[] bytes = payload.pngBytes();
+        String mime = payload.mimeType() == null || payload.mimeType().isBlank() ? "image/png" : payload.mimeType();
+        data.addProperty("mime", mime);
+        byte[] bytes = payload.imageBytes();
         if (bytes != null && bytes.length > 0) {
             data.addProperty("base64_png", Base64.getEncoder().encodeToString(bytes));
             data.addProperty("byte_length", bytes.length);

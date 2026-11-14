@@ -1,9 +1,15 @@
 pluginManagement {
     repositories {
+        // Prefer local vendored plugins / MDG artifacts when present.
+        maven {
+            name = 'theseusLocal'
+            url = uri("${rootDir}/local-maven")
+        }
         maven { url = 'https://bmclapi2.bangbang93.com/maven' }
-        maven { url = 'https://maven.neoforged.net/releases' }
         gradlePluginPortal()
         mavenCentral()
+        // Official last — weak networks hang here for minutes.
+        maven { url = 'https://maven.neoforged.net/releases' }
     }
 }
 

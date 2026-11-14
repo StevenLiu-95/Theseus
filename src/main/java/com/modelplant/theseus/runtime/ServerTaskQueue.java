@@ -1,13 +1,10 @@
 package com.modelplant.theseus.runtime;
 
-import com.modelplant.theseus.Theseus;
 import com.modelplant.theseus.config.TheseusServerConfig;
 import net.minecraft.server.MinecraftServer;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
-import java.util.ArrayDeque;
 import java.util.Objects;
-import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.Supplier;
@@ -19,7 +16,6 @@ public final class ServerTaskQueue {
     private static final ServerTaskQueue INSTANCE = new ServerTaskQueue();
 
     private final ConcurrentLinkedQueue<QueuedTask<?>> queue = new ConcurrentLinkedQueue<>();
-    private final Queue<Runnable> deferred = new ArrayDeque<>();
     private volatile MinecraftServer server;
     private int blockChangesThisTick;
 
@@ -37,7 +33,6 @@ public final class ServerTaskQueue {
     public void unbind() {
         this.server = null;
         queue.clear();
-        deferred.clear();
     }
 
     public MinecraftServer server() {
@@ -89,13 +84,6 @@ public final class ServerTaskQueue {
                 break;
             }
             task.run();
-        }
-        while (!deferred.isEmpty()) {
-            try {
-                deferred.poll().run();
-            } catch (Exception e) {
-                Theseus.LOGGER.error("Deferred task failed", e);
-            }
         }
     }
 

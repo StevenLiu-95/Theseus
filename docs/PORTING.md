@@ -10,6 +10,6 @@
 4. **玩家操控**：`ServerPlayerGameMode.destroyBlock`、`BlockItem.place`、移动同步。
 5. **截图**：`Screenshot.takeScreenshot`、`NativeImage` 写文件 API。
 6. **实体查询**：`ServerLevel.getEntity(UUID)` 是否仍可用。
-7. **配置**：`ModConfigSpec` / `ModConfig.Type.SERVER|CLIENT`。
+7. **配置**：`ModConfigSpec` / `ModConfig.Type.COMMON|CLIENT`；玩家 LLM 偏好在 `PlayerConfigStore`（非世界存档）。
 
 建议策略：保持 `api/` 包稳定，把版本差异隔离在 `control/`、`vision/`、`network/`、`world/`。

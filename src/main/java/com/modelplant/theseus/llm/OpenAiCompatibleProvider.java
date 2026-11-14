@@ -9,9 +9,11 @@ import com.modelplant.theseus.api.llm.ChatRequest;
 import com.modelplant.theseus.api.llm.ChatResponse;
 import com.modelplant.theseus.api.llm.LlmProvider;
 import com.modelplant.theseus.api.llm.StreamDeltaConsumer;
+import com.modelplant.theseus.api.llm.TokenUsage;
 import com.modelplant.theseus.api.llm.ToolCall;
 import com.modelplant.theseus.api.tool.ToolSchema;
 import com.modelplant.theseus.config.TheseusServerConfig;
+import com.modelplant.theseus.runtime.TheseusExecutors;
 
 import java.io.BufferedReader;
 import java.io.InputStream;
@@ -36,18 +38,20 @@ public final class OpenAiCompatibleProvider implements LlmProvider {
     private final Supplier<String> baseUrlSupplier;
 
     public OpenAiCompatibleProvider() {
-        this("openai", "OpenAI Compatible", true, TheseusServerConfig.OPENAI_BASE_URL::get);
+        this("openai", "OpenAI Compatible", true);
     }
 
     public OpenAiCompatibleProvider(String id, String displayName, boolean vision) {
-        this(id, displayName, vision, TheseusServerConfig.OPENAI_BASE_URL::get);
+        this(id, displayName, vision, () -> ProviderEndpoints.openAiCompatibleBase(id, null));
     }
 
     public OpenAiCompatibleProvider(String id, String displayName, boolean vision, Supplier<String> baseUrlSupplier) {
         this.id = id;
         this.displayName = displayName;
         this.vision = vision;
-        this.baseUrlSupplier = baseUrlSupplier;
+        this.baseUrlSupplier = baseUrlSupplier != null
+                ? baseUrlSupplier
+                : () -> ProviderEndpoints.openAiCompatibleBase(id, null);
     }
 
     @Override
@@ -87,7 +91,7 @@ public final class OpenAiCompatibleProvider implements LlmProvider {
             } catch (Exception e) {
                 throw new RuntimeException("OpenAI-compatible request failed: " + e.getMessage(), e);
             }
-        });
+        }, TheseusExecutors.workers());
     }
 
     private JsonObject buildBody(ChatRequest request, boolean stream) {
@@ -117,8 +121,12 @@ public final class OpenAiCompatibleProvider implements LlmProvider {
         return body;
     }
 
-    private String baseUrl() {
-        String base = baseUrlSupplier.get();
+    private String baseUrl(ChatRequest request) {
+        String fallback = baseUrlSupplier.get();
+        String base = request.effectiveBaseUrl(fallback);
+        if (base == null) {
+            base = "";
+        }
         if (base.endsWith("/")) {
             base = base.substring(0, base.length() - 1);
         }
@@ -127,7 +135,7 @@ public final class OpenAiCompatibleProvider implements LlmProvider {
 
     private ChatResponse doChat(ChatRequest request, String apiKey) throws Exception {
         HttpRequest httpRequest = HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl() + "/chat/completions"))
+                .uri(URI.create(baseUrl(request) + "/chat/completions"))
                 .timeout(Duration.ofSeconds(TheseusServerConfig.REQUEST_TIMEOUT_SECONDS.getAsInt()))
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
@@ -143,7 +151,7 @@ public final class OpenAiCompatibleProvider implements LlmProvider {
 
     private ChatResponse doChatStreaming(ChatRequest request, String apiKey, StreamDeltaConsumer onDelta) throws Exception {
         HttpRequest httpRequest = HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl() + "/chat/completions"))
+                .uri(URI.create(baseUrl(request) + "/chat/completions"))
                 .timeout(Duration.ofSeconds(TheseusServerConfig.REQUEST_TIMEOUT_SECONDS.getAsInt()))
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
@@ -158,6 +166,8 @@ public final class OpenAiCompatibleProvider implements LlmProvider {
         }
 
         StringBuilder content = new StringBuilder();
+        StringBuilder reasoning = new StringBuilder();
+        TokenUsage usage = TokenUsage.UNKNOWN;
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
@@ -173,6 +183,10 @@ public final class OpenAiCompatibleProvider implements LlmProvider {
                 }
                 try {
                     JsonObject chunk = JsonParser.parseString(data).getAsJsonObject();
+                    TokenUsage chunkUsage = parseUsage(chunk);
+                    if (chunkUsage.known()) {
+                        usage = chunkUsage;
+                    }
                     JsonArray choices = chunk.getAsJsonArray("choices");
                     if (choices == null || choices.isEmpty()) {
                         continue;
@@ -180,17 +194,24 @@ public final class OpenAiCompatibleProvider implements LlmProvider {
                     JsonObject choice = choices.get(0).getAsJsonObject();
                     JsonObject delta = choice.has("delta") && choice.get("delta").isJsonObject()
                             ? choice.getAsJsonObject("delta") : null;
-                    if (delta != null && delta.has("content") && !delta.get("content").isJsonNull()) {
-                        String piece = delta.get("content").getAsString();
-                        content.append(piece);
-                        onDelta.onDelta(piece);
+                    if (delta != null) {
+                        String thinkPiece = extractReasoning(delta);
+                        if (thinkPiece != null && !thinkPiece.isEmpty()) {
+                            reasoning.append(thinkPiece);
+                        }
+                        if (delta.has("content") && !delta.get("content").isJsonNull()) {
+                            String piece = delta.get("content").getAsString();
+                            content.append(piece);
+                            onDelta.onDelta(piece);
+                        }
                     }
                 } catch (Exception ignored) {
                     // skip malformed SSE chunks
                 }
             }
         }
-        return ChatResponse.text(content.toString());
+        return new ChatResponse(content.toString(), List.of(), "stop", content.toString(),
+                reasoning.toString(), usage);
     }
 
     static ChatResponse parse(String raw) {
@@ -215,7 +236,44 @@ public final class OpenAiCompatibleProvider implements LlmProvider {
         String finish = choices.get(0).getAsJsonObject().has("finish_reason")
                 ? choices.get(0).getAsJsonObject().get("finish_reason").getAsString()
                 : "stop";
-        return new ChatResponse(content, toolCalls, finish, raw);
+        return new ChatResponse(content, toolCalls, finish, raw, extractReasoning(message), parseUsage(root));
+    }
+
+    static TokenUsage parseUsage(JsonObject root) {
+        if (root == null || !root.has("usage") || !root.get("usage").isJsonObject()) {
+            return TokenUsage.UNKNOWN;
+        }
+        JsonObject usage = root.getAsJsonObject("usage");
+        return new TokenUsage(
+                intOrNeg(usage, "prompt_tokens", "input_tokens"),
+                intOrNeg(usage, "completion_tokens", "output_tokens"),
+                intOrNeg(usage, "total_tokens")
+        );
+    }
+
+    static String extractReasoning(JsonObject messageOrDelta) {
+        if (messageOrDelta == null) {
+            return "";
+        }
+        for (String key : List.of("reasoning_content", "reasoning", "thinking")) {
+            if (messageOrDelta.has(key) && !messageOrDelta.get(key).isJsonNull()) {
+                return messageOrDelta.get(key).getAsString();
+            }
+        }
+        return "";
+    }
+
+    private static int intOrNeg(JsonObject obj, String... keys) {
+        for (String key : keys) {
+            if (obj.has(key) && !obj.get(key).isJsonNull()) {
+                try {
+                    return obj.get(key).getAsInt();
+                } catch (Exception ignored) {
+                    // keep looking
+                }
+            }
+        }
+        return -1;
     }
 
     private static String truncate(String s) {

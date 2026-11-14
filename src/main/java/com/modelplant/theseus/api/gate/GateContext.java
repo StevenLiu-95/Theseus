@@ -67,6 +67,6 @@ public final class GateContext {
     }
 
     public boolean capabilityEnabled(String capability) {
-        return enabledCapabilities.contains(capability) || enabledCapabilities.contains("*");
+        return GateCapabilities.enabled(enabledCapabilities, capability);
     }
 }

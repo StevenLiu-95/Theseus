@@ -14,7 +14,8 @@ public record ScreenshotResponsePayload(
         String pathOrError,
         int width,
         int height,
-        byte[] pngBytes
+        String mimeType,
+        byte[] imageBytes
 ) implements CustomPacketPayload {
     public static final Type<ScreenshotResponsePayload> TYPE =
             new Type<>(ResourceLocation.fromNamespaceAndPath(Theseus.MOD_ID, "screenshot_response"));
@@ -26,7 +27,8 @@ public record ScreenshotResponsePayload(
                 buf.writeUtf(value.pathOrError == null ? "" : value.pathOrError, 32767);
                 buf.writeVarInt(value.width);
                 buf.writeVarInt(value.height);
-                byte[] bytes = value.pngBytes == null ? new byte[0] : value.pngBytes;
+                buf.writeUtf(value.mimeType == null || value.mimeType.isBlank() ? "image/png" : value.mimeType, 64);
+                byte[] bytes = value.imageBytes == null ? new byte[0] : value.imageBytes;
                 buf.writeVarInt(bytes.length);
                 if (bytes.length > 0) {
                     buf.writeBytes(bytes);
@@ -38,12 +40,13 @@ public record ScreenshotResponsePayload(
                 String path = buf.readUtf(32767);
                 int width = buf.readVarInt();
                 int height = buf.readVarInt();
+                String mime = buf.readUtf(64);
                 int len = buf.readVarInt();
                 byte[] bytes = new byte[Math.max(0, len)];
                 if (len > 0) {
                     buf.readBytes(bytes);
                 }
-                return new ScreenshotResponsePayload(id, success, path, width, height, bytes);
+                return new ScreenshotResponsePayload(id, success, path, width, height, mime, bytes);
             }
     );
 

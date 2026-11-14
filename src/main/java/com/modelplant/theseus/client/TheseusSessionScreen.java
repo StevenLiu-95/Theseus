@@ -28,11 +28,15 @@ public final class TheseusSessionScreen extends Screen {
         input.setHint(Component.literal("Talk to Theseus..."));
         addRenderableWidget(input);
         addRenderableWidget(Button.builder(Component.literal("Send"), b -> send())
-                .bounds(width / 2 - 140, height / 2 + 20, 90, 20).build());
+                .bounds(width / 2 - 140, height / 2 + 20, 66, 20).build());
+        addRenderableWidget(Button.builder(Component.literal("Cancel"), b -> {
+            runCommand("theseus cancel");
+            status = "Cancel requested";
+        }).bounds(width / 2 - 68, height / 2 + 20, 66, 20).build());
         addRenderableWidget(Button.builder(Component.literal("Tools"), b -> runCommand("theseus tools"))
-                .bounds(width / 2 - 40, height / 2 + 20, 90, 20).build());
+                .bounds(width / 2 + 4, height / 2 + 20, 66, 20).build());
         addRenderableWidget(Button.builder(Component.literal("Close"), b -> onClose())
-                .bounds(width / 2 + 60, height / 2 + 20, 80, 20).build());
+                .bounds(width / 2 + 76, height / 2 + 20, 64, 20).build());
         setInitialFocus(input);
     }
 
