@@ -3,6 +3,7 @@ package com.modelplant.theseus.control;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.modelplant.theseus.api.tool.ToolResult;
+import com.modelplant.theseus.config.TheseusServerConfig;
 import com.modelplant.theseus.network.PlayerControlPayload;
 import com.modelplant.theseus.network.TheseusNetwork;
 import net.minecraft.core.BlockPos;
@@ -13,6 +14,8 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
@@ -36,6 +39,7 @@ public final class PlayerController {
     private static final int MAX_GOTO_TICKS = 20 * 45;
 
     private final Map<UUID, MoveTask> moves = new ConcurrentHashMap<>();
+    private final Map<UUID, FocusLock> focuses = new ConcurrentHashMap<>();
 
     private PlayerController() {
     }
@@ -56,12 +60,105 @@ public final class PlayerController {
         return ToolResult.ok("Navigating toward " + x + "," + y + "," + z + " (simple goto)");
     }
 
+    /** Absolute yaw/pitch look. Clears any active focus lock. */
     public ToolResult look(ServerPlayer player, float yaw, float pitch) {
-        player.setYRot(yaw);
-        player.setXRot(pitch);
-        player.yHeadRot = yaw;
-        TheseusNetwork.sendToPlayer(player, new PlayerControlPayload(PlayerControlPayload.Action.LOOK, 0, 0, 0, yaw, pitch, false));
-        return ToolResult.ok("Look set to yaw=" + yaw + " pitch=" + pitch);
+        clearFocus(player.getUUID());
+        float clampedPitch = clampPitch(pitch);
+        applyLook(player, yaw, clampedPitch, true);
+        return ToolResult.ok("Look set to yaw=" + yaw + " pitch=" + clampedPitch);
+    }
+
+    /** One-shot look toward a world point. Clears focus. */
+    public ToolResult lookAtPoint(ServerPlayer player, double x, double y, double z) {
+        if (!withinActionRadius(player, x, y, z)) {
+            return ToolResult.error("Target outside allowed action radius");
+        }
+        clearFocus(player.getUUID());
+        float[] yp = yawPitchToward(player, new Vec3(x, y, z));
+        applyLook(player, yp[0], yp[1], true);
+        JsonObject data = lookData("point", yp[0], yp[1]);
+        data.addProperty("x", x);
+        data.addProperty("y", y);
+        data.addProperty("z", z);
+        return ToolResult.ok("Looking at point " + x + "," + y + "," + z, data);
+    }
+
+    /** One-shot look toward an entity. Clears focus. */
+    public ToolResult lookAtEntity(ServerPlayer player, UUID entityId) {
+        Entity entity = resolveEntity(player, entityId);
+        if (entity == null) {
+            return ToolResult.error("Entity not found: " + entityId);
+        }
+        Vec3 aim = aimPoint(entity);
+        if (!withinActionRadius(player, aim.x, aim.y, aim.z)) {
+            return ToolResult.error("Entity outside allowed action radius");
+        }
+        clearFocus(player.getUUID());
+        float[] yp = yawPitchToward(player, aim);
+        applyLook(player, yp[0], yp[1], true);
+        JsonObject data = lookData("entity", yp[0], yp[1]);
+        data.addProperty("entity_uuid", entityId.toString());
+        data.addProperty("entity_type", BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString());
+        return ToolResult.ok("Looking at entity " + entity.getName().getString(), data);
+    }
+
+    /** Lock view onto a target each tick. Pass unlock=true via {@link #clearFocus(ServerPlayer)}. */
+    public ToolResult focusAngles(ServerPlayer player, float yaw, float pitch) {
+        float clampedPitch = clampPitch(pitch);
+        focuses.put(player.getUUID(), FocusLock.angles(yaw, clampedPitch));
+        applyLook(player, yaw, clampedPitch, true);
+        JsonObject data = lookData("angles", yaw, clampedPitch);
+        data.addProperty("locked", true);
+        return ToolResult.ok("Focus locked to yaw=" + yaw + " pitch=" + clampedPitch, data);
+    }
+
+    public ToolResult focusPoint(ServerPlayer player, double x, double y, double z) {
+        if (!withinActionRadius(player, x, y, z)) {
+            return ToolResult.error("Target outside allowed action radius");
+        }
+        focuses.put(player.getUUID(), FocusLock.point(x, y, z));
+        float[] yp = yawPitchToward(player, new Vec3(x, y, z));
+        applyLook(player, yp[0], yp[1], true);
+        JsonObject data = lookData("point", yp[0], yp[1]);
+        data.addProperty("x", x);
+        data.addProperty("y", y);
+        data.addProperty("z", z);
+        data.addProperty("locked", true);
+        return ToolResult.ok("Focus locked on point " + x + "," + y + "," + z, data);
+    }
+
+    public ToolResult focusEntity(ServerPlayer player, UUID entityId) {
+        Entity entity = resolveEntity(player, entityId);
+        if (entity == null) {
+            return ToolResult.error("Entity not found: " + entityId);
+        }
+        Vec3 aim = aimPoint(entity);
+        if (!withinActionRadius(player, aim.x, aim.y, aim.z)) {
+            return ToolResult.error("Entity outside allowed action radius");
+        }
+        focuses.put(player.getUUID(), FocusLock.entity(entityId));
+        float[] yp = yawPitchToward(player, aim);
+        applyLook(player, yp[0], yp[1], true);
+        JsonObject data = lookData("entity", yp[0], yp[1]);
+        data.addProperty("entity_uuid", entityId.toString());
+        data.addProperty("locked", true);
+        return ToolResult.ok("Focus locked on entity " + entity.getName().getString(), data);
+    }
+
+    public ToolResult clearFocus(ServerPlayer player) {
+        boolean had = focuses.remove(player.getUUID()) != null;
+        JsonObject data = new JsonObject();
+        data.addProperty("locked", false);
+        data.addProperty("was_locked", had);
+        return ToolResult.ok(had ? "Focus unlocked" : "No active focus lock", data);
+    }
+
+    public void clearFocus(UUID playerId) {
+        focuses.remove(playerId);
+    }
+
+    public boolean hasFocus(UUID playerId) {
+        return focuses.containsKey(playerId);
     }
 
     public ToolResult breakBlock(ServerPlayer player, BlockPos pos) {
@@ -349,14 +446,22 @@ public final class PlayerController {
     }
 
     public void onServerTick(ServerTickEvent.Post event) {
+        tickMoves(event);
+        tickFocuses(event);
+    }
+
+    private void tickMoves(ServerTickEvent.Post event) {
         Iterator<Map.Entry<UUID, MoveTask>> it = moves.entrySet().iterator();
         while (it.hasNext()) {
             Map.Entry<UUID, MoveTask> entry = it.next();
             ServerPlayer player = event.getServer().getPlayerList().getPlayer(entry.getKey());
             if (player == null) {
                 it.remove();
+                focuses.remove(entry.getKey());
                 continue;
             }
+            // While focus-locked, still move but leave look to focus tick.
+            boolean focusLocked = focuses.containsKey(entry.getKey());
             MoveTask task = entry.getValue();
             task.ticks++;
             if (task.ticks > MAX_GOTO_TICKS) {
@@ -383,17 +488,115 @@ public final class PlayerController {
             player.setDeltaMovement(dir.x, player.getDeltaMovement().y, dir.z);
             player.hurtMarked = true;
 
-            float yaw = (float) (Math.toDegrees(Math.atan2(-dir.x, dir.z)));
-            float pitch = task.navigate ? (float) (-Math.toDegrees(Math.atan2(delta.y, Math.max(horiz, 0.001)))) : player.getXRot();
-            pitch = Math.max(-90f, Math.min(90f, pitch));
-            player.setYRot(yaw);
-            player.setXRot(pitch);
-            player.yHeadRot = yaw;
+            if (!focusLocked) {
+                float yaw = (float) (Math.toDegrees(Math.atan2(-dir.x, dir.z)));
+                float pitch = task.navigate
+                        ? (float) (-Math.toDegrees(Math.atan2(delta.y, Math.max(horiz, 0.001))))
+                        : player.getXRot();
+                pitch = clampPitch(pitch);
+                player.setYRot(yaw);
+                player.setXRot(pitch);
+                player.yHeadRot = yaw;
+            }
 
             if (task.navigate) {
                 maybeStepOrJump(player, dir, delta.y);
             }
         }
+    }
+
+    private void tickFocuses(ServerTickEvent.Post event) {
+        Iterator<Map.Entry<UUID, FocusLock>> it = focuses.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<UUID, FocusLock> entry = it.next();
+            ServerPlayer player = event.getServer().getPlayerList().getPlayer(entry.getKey());
+            if (player == null) {
+                it.remove();
+                continue;
+            }
+            FocusLock lock = entry.getValue();
+            Optional<float[]> look = resolveFocusLook(player, lock);
+            if (look.isEmpty()) {
+                it.remove();
+                continue;
+            }
+            float[] yp = look.get();
+            applyLook(player, yp[0], yp[1], true);
+        }
+    }
+
+    private static Optional<float[]> resolveFocusLook(ServerPlayer player, FocusLock lock) {
+        return switch (lock.kind) {
+            case ANGLES -> Optional.of(new float[]{lock.yaw, lock.pitch});
+            case POINT -> {
+                if (!withinActionRadius(player, lock.x, lock.y, lock.z)) {
+                    yield Optional.empty();
+                }
+                yield Optional.of(yawPitchToward(player, new Vec3(lock.x, lock.y, lock.z)));
+            }
+            case ENTITY -> {
+                Entity entity = resolveEntity(player, lock.entityId);
+                if (entity == null) {
+                    yield Optional.empty();
+                }
+                Vec3 aim = aimPoint(entity);
+                if (!withinActionRadius(player, aim.x, aim.y, aim.z)) {
+                    yield Optional.empty();
+                }
+                yield Optional.of(yawPitchToward(player, aim));
+            }
+        };
+    }
+
+    private static void applyLook(ServerPlayer player, float yaw, float pitch, boolean syncClient) {
+        float clampedPitch = clampPitch(pitch);
+        player.setYRot(yaw);
+        player.setXRot(clampedPitch);
+        player.yHeadRot = yaw;
+        if (syncClient) {
+            TheseusNetwork.sendToPlayer(player,
+                    new PlayerControlPayload(PlayerControlPayload.Action.LOOK, 0, 0, 0, yaw, clampedPitch, false));
+        }
+    }
+
+    private static float[] yawPitchToward(ServerPlayer player, Vec3 target) {
+        Vec3 eye = player.getEyePosition();
+        Vec3 delta = target.subtract(eye);
+        double horiz = Math.sqrt(delta.x * delta.x + delta.z * delta.z);
+        float yaw = (float) Math.toDegrees(Math.atan2(-delta.x, delta.z));
+        float pitch = (float) (-Math.toDegrees(Math.atan2(delta.y, Math.max(horiz, 1.0E-6))));
+        return new float[]{yaw, clampPitch(pitch)};
+    }
+
+    private static Vec3 aimPoint(Entity entity) {
+        if (entity instanceof LivingEntity living) {
+            return living.getEyePosition();
+        }
+        return entity.getBoundingBox().getCenter();
+    }
+
+    private static Entity resolveEntity(ServerPlayer player, UUID entityId) {
+        if (entityId == null) {
+            return null;
+        }
+        return player.serverLevel().getEntity(entityId);
+    }
+
+    private static boolean withinActionRadius(ServerPlayer player, double x, double y, double z) {
+        double max = TheseusServerConfig.MAX_ACTION_RADIUS.getAsInt();
+        return player.position().distanceToSqr(x, y, z) <= max * max;
+    }
+
+    private static float clampPitch(float pitch) {
+        return Math.max(-90f, Math.min(90f, pitch));
+    }
+
+    private static JsonObject lookData(String mode, float yaw, float pitch) {
+        JsonObject data = new JsonObject();
+        data.addProperty("mode", mode);
+        data.addProperty("yaw", yaw);
+        data.addProperty("pitch", pitch);
+        return data;
     }
 
     private static void maybeStepOrJump(ServerPlayer player, Vec3 dir, double deltaY) {
@@ -437,6 +640,48 @@ public final class PlayerController {
             this.sprint = sprint;
             this.navigate = navigate;
             this.ticks = ticks;
+        }
+    }
+
+    private static final class FocusLock {
+        private enum Kind { ANGLES, POINT, ENTITY }
+
+        private final Kind kind;
+        private final float yaw;
+        private final float pitch;
+        private final double x;
+        private final double y;
+        private final double z;
+        private final UUID entityId;
+
+        private FocusLock(
+                Kind kind,
+                float yaw,
+                float pitch,
+                double x,
+                double y,
+                double z,
+                UUID entityId
+        ) {
+            this.kind = kind;
+            this.yaw = yaw;
+            this.pitch = pitch;
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            this.entityId = entityId;
+        }
+
+        private static FocusLock angles(float yaw, float pitch) {
+            return new FocusLock(Kind.ANGLES, yaw, pitch, 0, 0, 0, null);
+        }
+
+        private static FocusLock point(double x, double y, double z) {
+            return new FocusLock(Kind.POINT, 0, 0, x, y, z, null);
+        }
+
+        private static FocusLock entity(UUID entityId) {
+            return new FocusLock(Kind.ENTITY, 0, 0, 0, 0, 0, entityId);
         }
     }
 }

@@ -79,11 +79,7 @@ public final class TheseusCommands {
                 .then(Commands.literal("chat")
                         .then(Commands.argument("message", StringArgumentType.greedyString())
                                 .executes(ctx -> chat(ctx.getSource(), StringArgumentType.getString(ctx, "message")))))
-                .then(Commands.literal("say")
-                        .then(Commands.argument("message", StringArgumentType.greedyString())
-                                .executes(ctx -> chat(ctx.getSource(), StringArgumentType.getString(ctx, "message")))))
                 .then(Commands.literal("cancel").executes(ctx -> cancelChat(ctx.getSource())))
-                .then(Commands.literal("stop").executes(ctx -> cancelChat(ctx.getSource())))
                 .then(Commands.literal("session")
                         .then(Commands.literal("new").executes(ctx -> sessionNew(ctx.getSource())))
                         .then(Commands.literal("clear").executes(ctx -> sessionClear(ctx.getSource())))
@@ -168,8 +164,8 @@ public final class TheseusCommands {
     private static int help(CommandSourceStack source) {
         source.sendSuccess(() -> Component.literal("""
                 Theseus commands:
-                /theseus chat|say <message>
-                /theseus cancel|stop
+                /theseus chat <message>
+                /theseus cancel
                 /theseus session new|clear|status
                 /theseus tools
                 /theseus providers

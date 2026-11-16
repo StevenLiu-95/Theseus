@@ -103,6 +103,7 @@ public final class TheseusBootstrap {
     public static void onLogout(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() != null) {
             ThinkingIndicator.clear(event.getEntity().getUUID());
+            PlayerController.get().clearFocus(event.getEntity().getUUID());
             AiSessionManager.get().remove(event.getEntity().getUUID());
         }
     }

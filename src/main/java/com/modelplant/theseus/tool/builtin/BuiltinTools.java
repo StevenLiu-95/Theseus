@@ -12,6 +12,7 @@ import com.modelplant.theseus.control.PlayerController;
 import com.modelplant.theseus.permission.TheseusPermissions;
 import com.modelplant.theseus.tool.TheseusToolRegistry;
 import com.modelplant.theseus.vision.ScreenshotService;
+import com.modelplant.theseus.world.BlockQueryService;
 import com.modelplant.theseus.world.WorldEditService;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.core.BlockPos;
@@ -25,6 +26,7 @@ import net.minecraft.world.phys.AABB;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
 
 public final class BuiltinTools {
     private BuiltinTools() {
@@ -35,11 +37,13 @@ public final class BuiltinTools {
         registry.register(echo());
         registry.register(getPlayerInfo());
         registry.register(getBlock());
+        registry.register(listBlocks());
         registry.register(listEntities());
         registry.register(executeCommand());
         registry.register(playerMove());
         registry.register(playerGoto());
         registry.register(playerLook());
+        registry.register(playerFocus());
         registry.register(playerBreakBlock());
         registry.register(playerPlaceBlock());
         registry.register(playerUseItem());
@@ -146,6 +150,60 @@ public final class BuiltinTools {
                 data.addProperty("block", BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
                 data.addProperty("state", state.toString());
                 return ToolResult.okJson(data);
+            }
+        };
+    }
+
+    private static Tool listBlocks() {
+        return new Tool() {
+            @Override
+            public ToolSchema schema() {
+                JsonObject props = objectProps();
+                props.add("x1", numberProp("Region corner X"));
+                props.add("y1", numberProp("Region corner Y"));
+                props.add("z1", numberProp("Region corner Z"));
+                props.add("x2", numberProp("Opposite corner X"));
+                props.add("y2", numberProp("Opposite corner Y"));
+                props.add("z2", numberProp("Opposite corner Z"));
+                props.add("property", stringProp(
+                        "Single BlockState property to include when present (e.g. facing, waterlogged, age)"));
+                props.add("properties", stringProp(
+                        "Comma-separated BlockState properties to include (e.g. facing,lit). "
+                                + "Each matching property is added under entry.properties"));
+                props.add("block", stringProp(
+                        "Optional block id filter; comma-separated (minecraft:stone or stone)"));
+                props.add("include_air", boolProp("Include air blocks (default false)"));
+                props.add("limit", numberProp("Max blocks to return (default 256, max "
+                        + BlockQueryService.MAX_RESULTS + ")"));
+                return new ToolSchema(
+                        "list_blocks",
+                        "List block coordinates and ids in a region; optionally attach named BlockState properties",
+                        objectSchema(props, "x1", "y1", "z1", "x2", "y2", "z2"));
+            }
+
+            @Override
+            public String capability() {
+                return "read";
+            }
+
+            @Override
+            public ToolResult execute(ToolContext context) {
+                BlockPos a = new BlockPos(
+                        context.argInt("x1", 0),
+                        context.argInt("y1", 0),
+                        context.argInt("z1", 0));
+                BlockPos b = new BlockPos(
+                        context.argInt("x2", 0),
+                        context.argInt("y2", 0),
+                        context.argInt("z2", 0));
+                return BlockQueryService.listBlocks(
+                        context.player(),
+                        a,
+                        b,
+                        BlockQueryService.parsePropertyNames(context.arguments()),
+                        BlockQueryService.parseBlockFilter(context.arguments()),
+                        context.argBool("include_air", false),
+                        context.argInt("limit", 256));
             }
         };
     }
@@ -306,10 +364,20 @@ public final class BuiltinTools {
             @Override
             public ToolSchema schema() {
                 JsonObject props = objectProps();
-                props.add("yaw", numberProp("Yaw"));
-                props.add("pitch", numberProp("Pitch"));
+                props.add("mode", stringProp(
+                        "Look mode: angles | point | entity. "
+                                + "Auto-detected from args if omitted (entity_uuid > x/y/z > yaw/pitch)"));
+                props.add("yaw", numberProp("Absolute yaw degrees (mode=angles)"));
+                props.add("pitch", numberProp("Absolute pitch degrees (mode=angles)"));
+                props.add("x", numberProp("World X (mode=point); use *.5 for block centers"));
+                props.add("y", numberProp("World Y (mode=point); use *.5 for block centers"));
+                props.add("z", numberProp("World Z (mode=point); use *.5 for block centers"));
+                props.add("entity_uuid", stringProp("Entity UUID to look at (mode=entity)"));
                 props.add("target_player", stringProp("Optional player name/UUID to control"));
-                return new ToolSchema("player_look", "Set player look direction", objectSchema(props, "yaw", "pitch"));
+                return new ToolSchema(
+                        "player_look",
+                        "One-shot look: absolute yaw/pitch, or aim at a world point or entity. Clears focus lock.",
+                        objectSchema(props));
             }
 
             @Override
@@ -323,10 +391,109 @@ public final class BuiltinTools {
                 if (target == null) {
                     return ToolResult.error("Cannot control target player");
                 }
-                return PlayerController.get().look(target, (float) context.argDouble("yaw", target.getYRot()),
-                        (float) context.argDouble("pitch", target.getXRot()));
+                return dispatchLookOrFocus(context, target, false);
             }
         };
+    }
+
+    private static Tool playerFocus() {
+        return new Tool() {
+            @Override
+            public ToolSchema schema() {
+                JsonObject props = objectProps();
+                props.add("unlock", boolProp(
+                        "If true, cancel the current view lock and ignore other targeting args"));
+                props.add("mode", stringProp(
+                        "Focus mode: angles | point | entity. Auto-detected from args if omitted"));
+                props.add("yaw", numberProp("Locked yaw degrees (mode=angles)"));
+                props.add("pitch", numberProp("Locked pitch degrees (mode=angles)"));
+                props.add("x", numberProp("World X (mode=point); use *.5 for block centers"));
+                props.add("y", numberProp("World Y (mode=point); use *.5 for block centers"));
+                props.add("z", numberProp("World Z (mode=point); use *.5 for block centers"));
+                props.add("entity_uuid", stringProp("Entity UUID to track (mode=entity)"));
+                props.add("target_player", stringProp("Optional player name/UUID to control"));
+                return new ToolSchema(
+                        "player_focus",
+                        "Lock player view onto angles, a point, or entity each tick; set unlock=true to cancel",
+                        objectSchema(props));
+            }
+
+            @Override
+            public String capability() {
+                return "control";
+            }
+
+            @Override
+            public ToolResult execute(ToolContext context) {
+                ServerPlayer target = resolveControlTarget(context);
+                if (target == null) {
+                    return ToolResult.error("Cannot control target player");
+                }
+                if (context.argBool("unlock", false)) {
+                    return PlayerController.get().clearFocus(target);
+                }
+                return dispatchLookOrFocus(context, target, true);
+            }
+        };
+    }
+
+    /**
+     * Shared targeting for one-shot look vs continuous focus.
+     */
+    private static ToolResult dispatchLookOrFocus(ToolContext context, ServerPlayer target, boolean focus) {
+        String mode = resolveAimMode(context);
+        PlayerController controller = PlayerController.get();
+        return switch (mode) {
+            case "entity" -> {
+                String raw = context.argString("entity_uuid", null);
+                if (raw == null || raw.isBlank()) {
+                    yield ToolResult.error("entity_uuid required for mode=entity");
+                }
+                UUID entityId;
+                try {
+                    entityId = UUID.fromString(raw.trim());
+                } catch (IllegalArgumentException e) {
+                    yield ToolResult.error("Invalid entity_uuid: " + raw);
+                }
+                yield focus ? controller.focusEntity(target, entityId) : controller.lookAtEntity(target, entityId);
+            }
+            case "point" -> {
+                if (!context.hasArg("x") || !context.hasArg("y") || !context.hasArg("z")) {
+                    yield ToolResult.error("x,y,z required for mode=point");
+                }
+                double x = context.argDouble("x", 0);
+                double y = context.argDouble("y", 0);
+                double z = context.argDouble("z", 0);
+                yield focus ? controller.focusPoint(target, x, y, z) : controller.lookAtPoint(target, x, y, z);
+            }
+            case "angles" -> {
+                if (!context.hasArg("yaw") && !context.hasArg("pitch")) {
+                    yield ToolResult.error("Provide yaw/pitch, or x/y/z, or entity_uuid "
+                            + (focus ? "(or unlock=true)" : ""));
+                }
+                float yaw = (float) context.argDouble("yaw", target.getYRot());
+                float pitch = (float) context.argDouble("pitch", target.getXRot());
+                yield focus ? controller.focusAngles(target, yaw, pitch) : controller.look(target, yaw, pitch);
+            }
+            case "block" -> ToolResult.error(
+                    "mode=block removed; use mode=point with block-center coords (x+0.5,y+0.5,z+0.5)");
+            default -> ToolResult.error("Unknown mode: " + mode + " (use angles|point|entity)");
+        };
+    }
+
+    private static String resolveAimMode(ToolContext context) {
+        String explicit = context.argString("mode", null);
+        if (explicit != null && !explicit.isBlank()) {
+            return explicit.trim().toLowerCase(Locale.ROOT);
+        }
+        String entityUuid = context.argString("entity_uuid", null);
+        if (entityUuid != null && !entityUuid.isBlank()) {
+            return "entity";
+        }
+        if (context.hasArg("x") && context.hasArg("y") && context.hasArg("z")) {
+            return "point";
+        }
+        return "angles";
     }
 
     private static Tool playerBreakBlock() {

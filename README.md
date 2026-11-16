@@ -76,22 +76,42 @@ powershell -File scripts/fast-jar.ps1
 
 ## 指令一览
 
-| 指令 | 说明 |
-|------|------|
-| `/theseus chat\|say <msg>` | 与 AI 对话 |
-| `/theseus cancel\|stop` | 中止当前正在进行的回复 / 工具循环 |
-| `/theseus session new\|clear\|status` | 会话管理 |
-| `/theseus tools` | 列出当前可见工具 |
-| `/theseus providers` | 列出 LLM Provider |
-| `/theseus local list\|status\|download\|use` | 本地模型目录 / 下载 / 启用 |
-| `/theseus config api <provider> <model> <key>` | 为本玩家设置服务商、模型、API Key |
-| `/theseus verbose [on\|off\|default]` | 对本玩家开关详细聊天（思考 / 工具调用 / 模型 / Token）；默认跟随服务端 `verboseChat` |
-| `/theseus config show\|provider\|model\|key\|url\|ollama\|iterations` | 本玩家分项配置；`iterations` 1–256；`url`/`ollama` 可覆盖默认 Base URL |
-| `/theseus config verbose` | OP：服务端 verbose 默认值 |
-| `/theseus mcp start\|stop` | MCP 桥开关 |
-| `/theseus status` | 运行状态 |
+除另有说明外，下列指令需由玩家在游戏内执行；LLM 相关配置（provider / model / key / url / iterations）按玩家 UUID 持久化，跨存档、玩家之间互不共享。
 
-辅助 GUI：`Ctrl+Alt+H`
+| 指令 | 功能 |
+|------|------|
+| `/theseus help` | 在聊天栏打印指令速查与 GUI 快捷键提示 |
+| `/theseus chat <msg>` | 向当前会话发送用户消息，触发 AI 回复与工具调用循环（会占用该玩家会话忙锁） |
+| `/theseus cancel` | 请求中止本玩家正在进行的 AI 回复 / 工具循环；若无进行中的回合则提示无可取消内容 |
+| `/theseus session new` | 先取消进行中的回复，再为本玩家创建全新会话（新 session id，清空历史） |
+| `/theseus session clear` | 先取消进行中的回复，再清空当前会话历史（保留会话，仅重置对话记忆） |
+| `/theseus session status` | 显示当前会话 id、历史消息条数、是否 busy |
+| `/theseus tools` | 列出对本玩家经 Tool Gate 过滤后当前可见的工具（名称 + capability） |
+| `/theseus providers` | 列出已注册的 LLM Provider（id 与显示名） |
+| `/theseus status` | 显示本玩家运行状态：provider、model、生效 URL、iterations、是否已设 key、主线程任务队列积压、MCP 开关、verbose、Ollama 是否可达；控制台执行时仅显示队列 / MCP / 服务端 verbose 默认值 |
+| `/theseus verbose` | 查看本玩家 verbose 是否开启及来源说明（开启时聊天会输出思考 / 工具调用 / 模型 / Token） |
+| `/theseus verbose on` | 为本玩家强制开启详细聊天 |
+| `/theseus verbose off` | 为本玩家强制关闭详细聊天 |
+| `/theseus verbose default` | 清除本玩家覆盖，改回跟随服务端 `verboseChat` 默认值 |
+| `/theseus local list` | 列出内置可下载本地模型目录（及相对本玩家配置的状态） |
+| `/theseus local status` | 汇总本机 Ollama / 本地模型可用状态 |
+| `/theseus local download <model>` | 通过 Ollama 拉取指定模型（支持目录 id 或 Ollama 名）；进度刷在聊天栏 |
+| `/theseus local use <model>` | 启用已下载模型：自动切到 `provider=ollama` 并设置对应 model |
+| `/theseus config show` | 显示本玩家完整 LLM 配置（provider、model、key 是否已设、生效 URL、iterations、temperature、maxTokens、verbose、各服务商 URL 覆盖、服务端已启用 capability） |
+| `/theseus config api <provider> <model> <key>` | 一条指令同时设置本玩家的服务商、模型与 API Key（支持 Tab 补全） |
+| `/theseus config provider <id>` | 仅切换本玩家服务商；会提示当前 URL 与建议模型名 |
+| `/theseus config model <name>` | 仅设置本玩家当前使用的模型名 |
+| `/theseus config key <provider> <value>` | 仅为指定服务商写入本玩家 API Key |
+| `/theseus config url <provider> <url>` | 为本玩家覆盖指定服务商的 Base URL（自定义中转等） |
+| `/theseus config ollama <url>` | 为本玩家覆盖 Ollama Base URL 的快捷写法（等价于对该 provider 设 url） |
+| `/theseus config iterations` | 查看本玩家单轮对话最大工具循环次数（1–256） |
+| `/theseus config iterations <n>` | 设置本玩家最大工具循环次数（1–256） |
+| `/theseus config verbose` | **OP（权限 2）**：查看服务端 `verboseChat` 默认值 |
+| `/theseus config verbose true\|false` | **OP（权限 2）**：写入并持久化服务端 `verboseChat` 默认值（无个人覆盖的玩家会跟随） |
+| `/theseus mcp start` | **OP（权限 2）**：按当前配置启动嵌入式 MCP HTTP 桥 |
+| `/theseus mcp stop` | **OP（权限 2）**：停止 MCP 桥 |
+
+辅助 GUI：`Ctrl+Alt+H`（会话界面，可快捷发送 chat / cancel / 查看 tools）
 
 ## LLM Providers
 
