@@ -47,7 +47,7 @@ powershell -File scripts/fast-jar.ps1
 2. 运行 `powershell -File scripts/vendor-and-build.ps1` 将依赖填充到 `local-maven/`
 3. 之后用 `--init-script init.gradle` 走本地缓存构建
 
-构建加速说明：`gradle.properties` 将 NFRT launcher meta 指向 BMCLAPI，并启用 Eclipse 并行重编译；NeoForge 相关坐标通过 `exclusiveContent` 只查 `local-maven`，避免弱网下远端仓库探测挂起。
+构建加速说明：`gradle.properties` 将 NFRT launcher meta 指向 BMCLAPI，并启用 Eclipse 并行重编译；NeoForge 相关坐标通过 `exclusiveContent` 只查 `local-maven`，避免弱网下远端仓库探测挂起。本机代理 / JDK 路径请写在 `gradle-local.properties`（见 `gradle-local.properties.example`），不要提交进仓库，以免 CI 误连 `127.0.0.1` 代理。
 
 ## 快速开始 / 验收
 

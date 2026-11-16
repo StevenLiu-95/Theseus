@@ -3,6 +3,9 @@
 build/
 !gradle/wrapper/gradle-wrapper.jar
 !**/src/**/build/
+# Machine-local proxy / JDK overrides (see gradle-local.properties.example)
+gradle-local.properties
+
 
 ### IntelliJ IDEA ###
 .idea/

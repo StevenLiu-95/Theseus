@@ -17,4 +17,20 @@ plugins {
     id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
 }
 
+// Optional machine-local overrides (proxy, JDK paths). Never commit gradle-local.properties.
+def localPropsFile = new File(rootDir, 'gradle-local.properties')
+if (localPropsFile.exists()) {
+    def localProps = new Properties()
+    localPropsFile.withInputStream { localProps.load(it) }
+    localProps.each { key, value ->
+        def k = key.toString()
+        def v = value.toString()
+        if (k.startsWith('systemProp.')) {
+            System.setProperty(k.substring('systemProp.'.length()), v)
+        } else {
+            startParameter.projectProperties.put(k, v)
+        }
+    }
+}
+
 rootProject.name = 'Theseus'

@@ -1,0 +1,11 @@
+# Copy to gradle-local.properties (gitignored) for machine-local Gradle overrides.
+# Loaded automatically by settings.gradle when present.
+
+# Optional: local JDK for toolchain discovery
+# org.gradle.java.installations.paths=C:\\Users\\Admin\\.jdks\\jdk-21.0.2
+
+# Optional: local HTTP proxy (same default as scripts/vendor-and-build.ps1)
+# systemProp.http.proxyHost=127.0.0.1
+# systemProp.http.proxyPort=7897
+# systemProp.https.proxyHost=127.0.0.1
+# systemProp.https.proxyPort=7897
