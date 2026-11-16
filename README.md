@@ -26,6 +26,8 @@ powershell -File scripts/fast-jar.ps1
 
 产物：`build/libs/theseus-0.1.0.jar`
 
+推送到 `main` 后，GitHub Actions 会自动构建并把模组 jar 发布到 [Releases](https://github.com/StevenLiu-95/Theseus/releases)（标签 `latest`，始终指向最新成功构建）。
+
 完整校验构建：
 
 ```bash

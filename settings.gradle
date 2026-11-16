@@ -22,15 +22,17 @@ def localPropsFile = new File(rootDir, 'gradle-local.properties')
 if (localPropsFile.exists()) {
     def localProps = new Properties()
     localPropsFile.withInputStream { localProps.load(it) }
+    def mergedProjectProps = new HashMap<String, String>(startParameter.projectProperties)
     localProps.each { key, value ->
         def k = key.toString()
         def v = value.toString()
         if (k.startsWith('systemProp.')) {
             System.setProperty(k.substring('systemProp.'.length()), v)
         } else {
-            startParameter.projectProperties.put(k, v)
+            mergedProjectProps.put(k, v)
         }
     }
+    startParameter.setProjectProperties(mergedProjectProps)
 }
 
 rootProject.name = 'Theseus'

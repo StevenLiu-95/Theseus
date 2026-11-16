@@ -2,6 +2,9 @@ name: Build
 
 on: [push, pull_request]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,3 +26,32 @@ jobs:
 
       - name: Build with Gradle
         run: ./gradlew build
+
+      - name: Locate mod jar
+        id: jar
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          jar=$(ls build/libs/theseus-*.jar | grep -v '\-sources\|\-javadoc\|\-slim' | head -n 1)
+          echo "path=$jar" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$jar")" >> "$GITHUB_OUTPUT"
+          echo "Found $jar"
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Build
+          prerelease: false
+          make_latest: true
+          generate_release_notes: true
+          body: |
+            Automated build from `main`.
+
+            - Commit: `${{ github.sha }}`
+            - Artifact: `${{ steps.jar.outputs.name }}`
+
+            Download the `.jar` below and drop it into your Minecraft `mods` folder (NeoForge 1.21.1).
+          files: ${{ steps.jar.outputs.path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
