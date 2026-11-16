@@ -17,8 +17,8 @@ allprojects {
         if (!(repo instanceof MavenArtifactRepository)) {
             return
         }
-        // Keep an explicit remote fallback for incomplete local-maven (see build.gradle).
-        if (repo.name == 'theseusNeoForgeFallback') {
+        // Keep explicit remote fallbacks for incomplete local-maven (see build.gradle).
+        if (repo.name != null && repo.name.toString().endsWith('Fallback')) {
             return
         }
         def url = repo.url?.toString() ?: ""

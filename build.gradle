@@ -27,9 +27,9 @@ sourceSets.main.resources {
 }
 
 repositories {
-    // NeoForge ecosystem: local-maven first, then a single official fallback.
-    // exclusiveContent keeps these coords off mavenCentral / random mirrors (fast fail).
-    // Repo name theseusNeoForgeFallback is intentionally NOT rewritten by init.gradle.
+    // NeoForge / Mojang coords: local-maven first, then official remotes required by MDG/NFRT.
+    // exclusiveContent keeps these groups off mavenCentral / random mirrors (fast fail).
+    // Named theseus*Fallback* repos are intentionally NOT rewritten by init.gradle.
     exclusiveContent {
         forRepository {
             maven {
@@ -41,6 +41,20 @@ repositories {
             maven {
                 name = 'theseusNeoForgeFallback'
                 url = 'https://maven.neoforged.net/releases'
+            }
+        }
+        forRepository {
+            // net.neoforged:minecraft-dependencies lives here (not under /releases).
+            maven {
+                name = 'theseusNeoForgeMojangMetaFallback'
+                url = 'https://maven.neoforged.net/mojang-meta'
+            }
+        }
+        forRepository {
+            // com.mojang:* (e.g. logging) is on Mojang libraries, not NeoForged releases.
+            maven {
+                name = 'theseusMinecraftLibrariesFallback'
+                url = 'https://libraries.minecraft.net'
             }
         }
         filter {
