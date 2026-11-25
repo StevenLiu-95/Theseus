@@ -111,11 +111,11 @@ TheseusAPI.taskQueue().submit(() -> {
 | Name | Capability | Notes |
 |------|------------|-------|
 | echo | echo | Off-thread OK |
-| get_player_info, get_block, list_entities, get_inventory | read | Radius on block reads |
+| get_player_info, get_block, list_entities, get_inventory, player_nav_status | read | `list_entities` sorted by distance + health/alive; optional `type_contains` |
 | execute_command | command | Whitelist + permission level |
-| player_move, player_goto, player_look, player_break_block, player_place_block, player_use_item, player_select_hotbar, player_open_inventory, player_drop_item, player_interact_block | control | goto = simple nav, not A* |
+| player_move, player_goto, player_stop, player_look, player_focus, player_break_block, player_place_block, player_attack, player_engage, player_use_item, player_select_hotbar, player_open_inventory, player_drop_item, player_interact_block | control | goto/move support `entity_uuid` follow; `player_engage` = chase+melee loop; not A* |
 | world_set_block, world_fill | world_edit | Tick block budget |
-| possess_entity, unpossess, possessed_action | possess | Per-session cap |
+| possess_entity, unpossess, possessed_action | possess | Per-session cap; actions: move/look/attack/follow_player/chase/engage |
 | take_screenshot | vision | Worker-only wait; client capture |
 
 ## Config surfaces
@@ -140,7 +140,8 @@ Auth: `Authorization: Bearer <mcpAuthToken>` when token configured.
 
 ## Known limits (avoid “fixing” into scope creep)
 
-- `player_goto` is straight-line + jump/step-up, not Baritone/A*
+- `player_goto` is straight-line + jump/step-up (optional entity follow + stuck/timeout); not Baritone/A*
+- Prefer `player_engage` for chase-and-kill; `player_attack` remains one-shot in-reach only
 - OpenAI-compatible streaming only for tool-free text rounds
 - Screenshot may fall back to path-only if payload too large
 - MCP SSE is not full Streamable HTTP session semantics

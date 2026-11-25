@@ -21,6 +21,10 @@ public record ToolResult(boolean success, String message, JsonElement data) {
         return new ToolResult(false, message, null);
     }
 
+    public static ToolResult error(String message, JsonElement data) {
+        return new ToolResult(false, message, data);
+    }
+
     public JsonObject toJson() {
         JsonObject obj = new JsonObject();
         obj.addProperty("success", success);

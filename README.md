@@ -184,7 +184,9 @@ Cursor 等外部 Agent 可把该桥当作 MCP/HTTP 工具后端。
 
 ## 已知限制
 
-- `player_goto` 为简单直线导航 + 跳跃/上台阶，不是完整 A* / Baritone
+- `player_goto` / `player_move` 为简单直线导航（可选 `entity_uuid` 追随移动目标，含卡住/超时状态）；**不是**完整 A* / Baritone
+- `player_engage` 可服务端自动追击并按冷却近战直至击杀 / 达次数 / 超时；`player_attack` 仍为单次挥砍（须已在触及距离内）
+- 远程弓箭蓄力射击尚未工具化
 - OpenAI 兼容流式仅在**无 tool schema 的纯文本轮**启用；带工具调用时走非流式
 - 截图磁盘为 PNG；网络超限时按 `screenshotJpegQuality` 尝试 JPEG，仍超限则仅保留路径（vision 附件可能缺失）
 - MCP SSE 仅为轻量 endpoint 通告，非完整双向 Streamable HTTP 会话

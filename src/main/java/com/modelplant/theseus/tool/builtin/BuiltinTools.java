@@ -21,9 +21,12 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
@@ -42,10 +45,14 @@ public final class BuiltinTools {
         registry.register(executeCommand());
         registry.register(playerMove());
         registry.register(playerGoto());
+        registry.register(playerStop());
+        registry.register(playerNavStatus());
         registry.register(playerLook());
         registry.register(playerFocus());
         registry.register(playerBreakBlock());
         registry.register(playerPlaceBlock());
+        registry.register(playerAttack());
+        registry.register(playerEngage());
         registry.register(playerUseItem());
         registry.register(playerSelectHotbar());
         registry.register(playerOpenInventory());
@@ -215,7 +222,11 @@ public final class BuiltinTools {
                 JsonObject props = objectProps();
                 props.add("radius", numberProp("Search radius"));
                 props.add("limit", numberProp("Max entities"));
-                return new ToolSchema("list_entities", "List nearby entities", objectSchema(props));
+                props.add("type_contains", stringProp(
+                        "Optional case-insensitive substring filter on entity type id (e.g. zombie, minecraft:pig)"));
+                return new ToolSchema("list_entities",
+                        "List nearby entities sorted by distance (includes distance/health/alive)",
+                        objectSchema(props));
             }
 
             @Override
@@ -227,23 +238,37 @@ public final class BuiltinTools {
             public ToolResult execute(ToolContext context) {
                 double radius = Math.min(context.argDouble("radius", 16), TheseusServerConfig.MAX_ACTION_RADIUS.getAsInt());
                 int limit = Math.min(context.argInt("limit", 32), 100);
+                String typeFilter = context.argString("type_contains", null);
+                String filter = typeFilter == null || typeFilter.isBlank()
+                        ? null
+                        : typeFilter.trim().toLowerCase(Locale.ROOT);
                 ServerPlayer player = context.player();
                 AABB box = player.getBoundingBox().inflate(radius);
-                List<Entity> entities = player.serverLevel().getEntities(player, box, e -> true);
+                List<Entity> entities = new ArrayList<>(player.serverLevel().getEntities(player, box, e -> true));
+                entities.sort(Comparator.comparingDouble(player::distanceToSqr));
                 JsonArray arr = new JsonArray();
-                int count = 0;
                 for (Entity entity : entities) {
-                    if (count++ >= limit) {
+                    if (arr.size() >= limit) {
                         break;
+                    }
+                    String typeId = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString();
+                    if (filter != null && !typeId.toLowerCase(Locale.ROOT).contains(filter)) {
+                        continue;
                     }
                     JsonObject obj = new JsonObject();
                     obj.addProperty("id", entity.getId());
                     obj.addProperty("uuid", entity.getUUID().toString());
-                    obj.addProperty("type", BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString());
+                    obj.addProperty("type", typeId);
                     obj.addProperty("name", entity.getName().getString());
                     obj.addProperty("x", entity.getX());
                     obj.addProperty("y", entity.getY());
                     obj.addProperty("z", entity.getZ());
+                    obj.addProperty("distance", player.distanceTo(entity));
+                    obj.addProperty("alive", entity.isAlive());
+                    if (entity instanceof LivingEntity living) {
+                        obj.addProperty("health", living.getHealth());
+                        obj.addProperty("max_health", living.getMaxHealth());
+                    }
                     arr.add(obj);
                 }
                 JsonObject data = new JsonObject();
@@ -298,12 +323,16 @@ public final class BuiltinTools {
             @Override
             public ToolSchema schema() {
                 JsonObject props = objectProps();
-                props.add("x", numberProp("Target X"));
-                props.add("y", numberProp("Target Y"));
-                props.add("z", numberProp("Target Z"));
+                props.add("x", numberProp("Target X (ignored when entity_uuid is set)"));
+                props.add("y", numberProp("Target Y (ignored when entity_uuid is set)"));
+                props.add("z", numberProp("Target Z (ignored when entity_uuid is set)"));
+                props.add("entity_uuid", stringProp("Optional entity to follow (direct velocity, no jump/step-up)"));
+                props.add("standoff", numberProp("Stop distance when following (default ~melee reach)"));
                 props.add("sprint", boolProp("Sprint"));
                 props.add("target_player", stringProp("Optional player name/UUID to control (default: self; OP can control others)"));
-                return new ToolSchema("player_move", "Move / path the player toward a position", objectSchema(props, "x", "y", "z"));
+                return new ToolSchema("player_move",
+                        "Direct velocity toward a point or follow an entity (no obstacle avoidance / not A*)",
+                        objectSchema(props));
             }
 
             @Override
@@ -316,6 +345,19 @@ public final class BuiltinTools {
                 ServerPlayer target = resolveControlTarget(context);
                 if (target == null) {
                     return ToolResult.error("Cannot control target player");
+                }
+                String followRaw = context.argString("entity_uuid", null);
+                if (followRaw != null && !followRaw.isBlank()) {
+                    UUID follow = parseUuidOrNull(followRaw);
+                    if (follow == null) {
+                        return ToolResult.error("Invalid entity_uuid: " + followRaw);
+                    }
+                    return PlayerController.get().followEntity(
+                            target, follow, context.argBool("sprint", false), false,
+                            context.argDouble("standoff", 0));
+                }
+                if (!context.hasArg("x") || !context.hasArg("y") || !context.hasArg("z")) {
+                    return ToolResult.error("Provide x/y/z or entity_uuid");
                 }
                 return PlayerController.get().moveTo(target,
                         context.argDouble("x", target.getX()),
@@ -331,12 +373,16 @@ public final class BuiltinTools {
             @Override
             public ToolSchema schema() {
                 JsonObject props = objectProps();
-                props.add("x", numberProp("Target X"));
-                props.add("y", numberProp("Target Y"));
-                props.add("z", numberProp("Target Z"));
+                props.add("x", numberProp("Target X (ignored when entity_uuid is set)"));
+                props.add("y", numberProp("Target Y (ignored when entity_uuid is set)"));
+                props.add("z", numberProp("Target Z (ignored when entity_uuid is set)"));
+                props.add("entity_uuid", stringProp("Optional entity to follow with step-up/jump (not A*/Baritone)"));
+                props.add("standoff", numberProp("Stop distance when following (default ~melee reach)"));
                 props.add("sprint", boolProp("Sprint"));
                 props.add("target_player", stringProp("Optional player name/UUID to control (default: self; OP can control others)"));
-                return new ToolSchema("player_goto", "Navigate player toward a position with simple step-up/jump", objectSchema(props, "x", "y", "z"));
+                return new ToolSchema("player_goto",
+                        "Simple straight-line navigation to a point or follow an entity (step-up/jump; not A*)",
+                        objectSchema(props));
             }
 
             @Override
@@ -350,11 +396,79 @@ public final class BuiltinTools {
                 if (target == null) {
                     return ToolResult.error("Cannot control target player");
                 }
+                String followRaw = context.argString("entity_uuid", null);
+                if (followRaw != null && !followRaw.isBlank()) {
+                    UUID follow = parseUuidOrNull(followRaw);
+                    if (follow == null) {
+                        return ToolResult.error("Invalid entity_uuid: " + followRaw);
+                    }
+                    return PlayerController.get().followEntity(
+                            target, follow, context.argBool("sprint", false), true,
+                            context.argDouble("standoff", 0));
+                }
+                if (!context.hasArg("x") || !context.hasArg("y") || !context.hasArg("z")) {
+                    return ToolResult.error("Provide x/y/z or entity_uuid");
+                }
                 return PlayerController.get().gotoPos(target,
                         context.argDouble("x", target.getX()),
                         context.argDouble("y", target.getY()),
                         context.argDouble("z", target.getZ()),
                         context.argBool("sprint", false));
+            }
+        };
+    }
+
+    private static Tool playerStop() {
+        return new Tool() {
+            @Override
+            public ToolSchema schema() {
+                JsonObject props = objectProps();
+                props.add("target_player", stringProp("Optional player name/UUID to control"));
+                return new ToolSchema("player_stop",
+                        "Cancel active player navigation and engage tasks",
+                        objectSchema(props));
+            }
+
+            @Override
+            public String capability() {
+                return "control";
+            }
+
+            @Override
+            public ToolResult execute(ToolContext context) {
+                ServerPlayer target = resolveControlTarget(context);
+                if (target == null) {
+                    return ToolResult.error("Cannot control target player");
+                }
+                return PlayerController.get().stopAll(target);
+            }
+        };
+    }
+
+    private static Tool playerNavStatus() {
+        return new Tool() {
+            @Override
+            public ToolSchema schema() {
+                JsonObject props = objectProps();
+                props.add("target_player", stringProp("Optional player name/UUID to inspect (default: self)"));
+                return new ToolSchema("player_nav_status",
+                        "Query active / last navigation and engage status for a player",
+                        objectSchema(props));
+            }
+
+            @Override
+            public String capability() {
+                return "read";
+            }
+
+            @Override
+            public ToolResult execute(ToolContext context) {
+                ServerPlayer target = resolveControlTarget(context);
+                if (target == null) {
+                    // read-only: fall back to self when control of others is denied
+                    target = context.player();
+                }
+                return PlayerController.get().navStatus(target);
             }
         };
     }
@@ -556,6 +670,94 @@ public final class BuiltinTools {
                     return ToolResult.error("Outside radius");
                 }
                 return PlayerController.get().placeBlock(target, pos);
+            }
+        };
+    }
+
+    private static Tool playerAttack() {
+        return new Tool() {
+            @Override
+            public ToolSchema schema() {
+                JsonObject props = objectProps();
+                props.add("entity_uuid", stringProp("UUID of the entity to melee-attack"));
+                props.add("look_at", boolProp("Face the target before attacking (default true)"));
+                props.add("force", boolProp("Attack even if cooldown is not ready (default false; weak hit)"));
+                props.add("target_player", stringProp("Optional player name/UUID to control"));
+                return new ToolSchema("player_attack",
+                        "One-shot melee attack (vanilla). Must already be in reach. "
+                                + "For chase-and-kill use player_engage; to close gap use player_goto with entity_uuid.",
+                        objectSchema(props, "entity_uuid"));
+            }
+
+            @Override
+            public String capability() {
+                return "control";
+            }
+
+            @Override
+            public ToolResult execute(ToolContext context) {
+                ServerPlayer target = resolveControlTarget(context);
+                if (target == null) {
+                    return ToolResult.error("Cannot control target player");
+                }
+                UUID entityId = parseUuidOrNull(context.argString("entity_uuid", null));
+                if (entityId == null) {
+                    return ToolResult.error("entity_uuid required or invalid");
+                }
+                return PlayerController.get().attackEntity(
+                        target,
+                        entityId,
+                        context.argBool("look_at", true),
+                        context.argBool("force", false));
+            }
+        };
+    }
+
+    private static Tool playerEngage() {
+        return new Tool() {
+            @Override
+            public ToolSchema schema() {
+                JsonObject props = objectProps();
+                props.add("entity_uuid", stringProp("UUID of the entity to chase and melee"));
+                props.add("until_dead", boolProp("Keep attacking until the target dies (default true)"));
+                props.add("max_hits", numberProp("Stop after N successful swings (ignored when until_dead=true unless set)"));
+                props.add("sprint", boolProp("Sprint while chasing (default true)"));
+                props.add("timeout_seconds", numberProp("Max engage duration in seconds (default from server config)"));
+                props.add("target_player", stringProp("Optional player name/UUID to control"));
+                return new ToolSchema("player_engage",
+                        "Server-tick melee engage: follow entity, wait for attack cooldown, swing until dead / max_hits / timeout",
+                        objectSchema(props, "entity_uuid"));
+            }
+
+            @Override
+            public String capability() {
+                return "control";
+            }
+
+            @Override
+            public ToolResult execute(ToolContext context) {
+                ServerPlayer target = resolveControlTarget(context);
+                if (target == null) {
+                    return ToolResult.error("Cannot control target player");
+                }
+                UUID entityId = parseUuidOrNull(context.argString("entity_uuid", null));
+                if (entityId == null) {
+                    return ToolResult.error("entity_uuid required or invalid");
+                }
+                boolean untilDead = context.argBool("until_dead", true);
+                int maxHits = context.argInt("max_hits", 0);
+                if (!untilDead && maxHits <= 0) {
+                    maxHits = 1;
+                }
+                double timeoutSec = context.argDouble("timeout_seconds", 0);
+                int timeoutTicks = timeoutSec > 0 ? (int) Math.round(timeoutSec * 20.0) : 0;
+                return PlayerController.get().engageEntity(
+                        target,
+                        entityId,
+                        untilDead,
+                        maxHits,
+                        context.argBool("sprint", true),
+                        timeoutTicks);
             }
         };
     }
@@ -855,11 +1057,15 @@ public final class BuiltinTools {
             public ToolSchema schema() {
                 JsonObject props = objectProps();
                 props.add("entity_uuid", stringProp("Possessed entity UUID"));
-                props.add("action", stringProp("move|look|attack|follow_player"));
-                props.add("x", numberProp("X"));
-                props.add("y", numberProp("Y"));
+                props.add("action", stringProp("move|look|attack|follow_player|chase|engage"));
+                props.add("x", numberProp("X / yaw for look"));
+                props.add("y", numberProp("Y / pitch for look"));
                 props.add("z", numberProp("Z"));
-                return new ToolSchema("possessed_action", "Command a possessed entity", objectSchema(props, "entity_uuid", "action"));
+                props.add("target_uuid", stringProp(
+                        "Required for attack/chase/engage: UUID of living entity to hit or pursue"));
+                return new ToolSchema("possessed_action",
+                        "Command a possessed entity. attack=one-shot; chase=pursue; engage=chase+attack until dead/out of range timeout.",
+                        objectSchema(props, "entity_uuid", "action"));
             }
 
             @Override
@@ -876,6 +1082,7 @@ public final class BuiltinTools {
                         context.argDouble("x", 0),
                         context.argDouble("y", 0),
                         context.argDouble("z", 0),
+                        context.argString("target_uuid", null),
                         context.player()
                 );
             }
@@ -927,6 +1134,17 @@ public final class BuiltinTools {
             return null;
         }
         return target;
+    }
+
+    private static UUID parseUuidOrNull(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return UUID.fromString(raw.trim());
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     private static BlockPos pos(ToolContext context) {

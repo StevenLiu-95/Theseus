@@ -70,13 +70,33 @@ public final class TheseusServerConfig {
             .comment("Max radius (blocks) for AI world/player actions from the owning player")
             .defineInRange("maxActionRadius", 64, 1, 512);
 
+    public static final ModConfigSpec.IntValue MAX_GOTO_TICKS = BUILDER
+            .comment("Max server ticks for a player_goto / player_move task before TIMEOUT")
+            .defineInRange("maxGotoTicks", 20 * 45, 20, 20 * 600);
+
+    public static final ModConfigSpec.IntValue NAV_STUCK_TICKS = BUILDER
+            .comment("Ticks of near-zero horizontal progress before a nav task ends as STUCK")
+            .defineInRange("navStuckTicks", 40, 5, 20 * 30);
+
+    public static final ModConfigSpec.IntValue ENGAGE_MAX_TICKS = BUILDER
+            .comment("Max server ticks for a player_engage combat task")
+            .defineInRange("engageMaxTicks", 20 * 60, 20, 20 * 600);
+
+    public static final ModConfigSpec.DoubleValue NAV_WALK_SPEED = BUILDER
+            .comment("Horizontal delta-movement scale for walking navigation")
+            .defineInRange("navWalkSpeed", 0.18d, 0.05d, 1.0d);
+
+    public static final ModConfigSpec.DoubleValue NAV_SPRINT_SPEED = BUILDER
+            .comment("Horizontal delta-movement scale for sprinting navigation")
+            .defineInRange("navSprintSpeed", 0.28d, 0.05d, 1.0d);
+
     public static final ModConfigSpec.IntValue COMMAND_WHITELIST_LEVEL = BUILDER
             .comment("Permission level required to run execute_command tool")
             .defineInRange("commandPermissionLevel", 2, 0, 4);
 
     public static final ModConfigSpec.ConfigValue<List<? extends String>> COMMAND_WHITELIST = BUILDER
             .comment("Allowed command roots for execute_command (empty = allow all when permitted)")
-            .defineListAllowEmpty("commandWhitelist", List.of("say", "tp", "give", "time", "weather", "gamemode", "effect", "summon", "fill", "setblock", "clone"), () -> "", o -> o instanceof String);
+            .defineListAllowEmpty("commandWhitelist", List.of("say", "tp", "give", "item", "time", "weather", "gamemode", "effect", "summon", "fill", "setblock", "clone"), () -> "", o -> o instanceof String);
 
     public static final ModConfigSpec.BooleanValue MCP_ENABLED = BUILDER
             .comment("Enable embedded MCP HTTP/SSE bridge")

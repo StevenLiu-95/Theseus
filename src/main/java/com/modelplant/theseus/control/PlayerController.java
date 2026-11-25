@@ -36,10 +36,13 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public final class PlayerController {
     private static final PlayerController INSTANCE = new PlayerController();
-    private static final int MAX_GOTO_TICKS = 20 * 45;
+    private static final double STUCK_EPSILON_SQR = 0.04; // ~0.2 blocks of progress
 
     private final Map<UUID, MoveTask> moves = new ConcurrentHashMap<>();
     private final Map<UUID, FocusLock> focuses = new ConcurrentHashMap<>();
+    private final Map<UUID, CombatTask> engages = new ConcurrentHashMap<>();
+    private final Map<UUID, NavStatus> lastNavStatus = new ConcurrentHashMap<>();
+    private final Map<UUID, CombatStatus> lastCombatStatus = new ConcurrentHashMap<>();
 
     private PlayerController() {
     }
@@ -49,15 +52,168 @@ public final class PlayerController {
     }
 
     public ToolResult moveTo(ServerPlayer player, double x, double y, double z, boolean sprint) {
-        moves.put(player.getUUID(), new MoveTask(x, y, z, sprint, false, 0));
-        TheseusNetwork.sendToPlayer(player, new PlayerControlPayload(PlayerControlPayload.Action.MOVE, x, y, z, 0, 0, sprint));
-        return ToolResult.ok("Moving toward " + x + "," + y + "," + z);
+        return startPointMove(player, x, y, z, sprint, false, 0.4);
     }
 
     public ToolResult gotoPos(ServerPlayer player, double x, double y, double z, boolean sprint) {
-        moves.put(player.getUUID(), new MoveTask(x, y, z, sprint, true, 0));
-        TheseusNetwork.sendToPlayer(player, new PlayerControlPayload(PlayerControlPayload.Action.MOVE, x, y, z, 0, 0, sprint));
-        return ToolResult.ok("Navigating toward " + x + "," + y + "," + z + " (simple goto)");
+        return startPointMove(player, x, y, z, sprint, true, 0.75);
+    }
+
+    /**
+     * Follow a living (or any) entity until within {@code standoff} horizontal blocks.
+     * {@code standoff <= 0} uses a melee-friendly default from the player's interaction range.
+     */
+    public ToolResult followEntity(ServerPlayer player, UUID entityId, boolean sprint, boolean navigate, double standoff) {
+        Entity entity = resolveEntity(player, entityId);
+        if (entity == null) {
+            return ToolResult.error("Entity not found: " + entityId);
+        }
+        if (!entity.isAlive()) {
+            return ToolResult.error("Entity is not alive");
+        }
+        Vec3 pos = entity.position();
+        if (!withinActionRadius(player, pos.x, pos.y, pos.z)) {
+            return ToolResult.error("Entity outside allowed action radius");
+        }
+        // Engaging owns movement; standalone follow cancels engage.
+        clearEngage(player.getUUID(), EndReason.CANCELLED);
+        double stopAt = standoff > 0 ? standoff : defaultMeleeStandoff(player);
+        MoveTask task = MoveTask.follow(entityId, pos.x, pos.y, pos.z, sprint, navigate, stopAt, player.position());
+        moves.put(player.getUUID(), task);
+        TheseusNetwork.sendToPlayer(player,
+                new PlayerControlPayload(PlayerControlPayload.Action.MOVE, pos.x, pos.y, pos.z, 0, 0, sprint));
+        JsonObject data = new JsonObject();
+        data.addProperty("mode", "follow");
+        data.addProperty("entity_uuid", entityId.toString());
+        data.addProperty("standoff", stopAt);
+        data.addProperty("sprint", sprint);
+        data.addProperty("navigate", navigate);
+        lastNavStatus.put(player.getUUID(), NavStatus.active(task));
+        return ToolResult.ok("Following entity " + entity.getName().getString()
+                + " (standoff=" + String.format(Locale.ROOT, "%.2f", stopAt) + ")", data);
+    }
+
+    private ToolResult startPointMove(
+            ServerPlayer player,
+            double x,
+            double y,
+            double z,
+            boolean sprint,
+            boolean navigate,
+            double standoff
+    ) {
+        clearEngage(player.getUUID(), EndReason.CANCELLED);
+        MoveTask task = MoveTask.point(x, y, z, sprint, navigate, standoff, player.position());
+        moves.put(player.getUUID(), task);
+        TheseusNetwork.sendToPlayer(player,
+                new PlayerControlPayload(PlayerControlPayload.Action.MOVE, x, y, z, 0, 0, sprint));
+        lastNavStatus.put(player.getUUID(), NavStatus.active(task));
+        String kind = navigate ? "Navigating toward " : "Moving toward ";
+        String note = navigate ? " (simple goto, not A*)" : " (direct velocity, no obstacle avoidance)";
+        return ToolResult.ok(kind + x + "," + y + "," + z + note);
+    }
+
+    /** Cancel active navigation and combat engage for this player. */
+    public ToolResult stopAll(ServerPlayer player) {
+        UUID id = player.getUUID();
+        boolean hadMove = moves.remove(id) != null;
+        boolean hadEngage = clearEngage(id, EndReason.CANCELLED);
+        player.setSprinting(false);
+        if (hadMove) {
+            lastNavStatus.put(id, NavStatus.finished(EndReason.CANCELLED, 0, null, 0, 0, 0));
+        }
+        JsonObject data = new JsonObject();
+        data.addProperty("stopped_move", hadMove);
+        data.addProperty("stopped_engage", hadEngage);
+        if (!hadMove && !hadEngage) {
+            return ToolResult.ok("No active navigation or engage", data);
+        }
+        return ToolResult.ok("Stopped active control tasks", data);
+    }
+
+    public void clearControl(UUID playerId) {
+        moves.remove(playerId);
+        clearEngage(playerId, EndReason.CANCELLED);
+        clearFocus(playerId);
+        lastNavStatus.remove(playerId);
+        lastCombatStatus.remove(playerId);
+    }
+
+    public ToolResult navStatus(ServerPlayer player) {
+        UUID id = player.getUUID();
+        MoveTask move = moves.get(id);
+        CombatTask combat = engages.get(id);
+        JsonObject data = new JsonObject();
+        data.addProperty("move_busy", move != null);
+        data.addProperty("engage_busy", combat != null);
+        NavStatus nav = lastNavStatus.get(id);
+        if (move != null) {
+            data.add("move", move.toJson(true));
+        } else if (nav != null) {
+            data.add("last_move", nav.toJson());
+        }
+        CombatStatus combatStatus = lastCombatStatus.get(id);
+        if (combat != null) {
+            data.add("engage", combat.toJson(true));
+        } else if (combatStatus != null) {
+            data.add("last_engage", combatStatus.toJson());
+        }
+        data.addProperty("focus_locked", focuses.containsKey(id));
+        return ToolResult.okJson(data);
+    }
+
+    /**
+     * Server-tick melee engage: chase target, wait for attack cooldown, swing until dead / max hits / timeout.
+     */
+    public ToolResult engageEntity(
+            ServerPlayer player,
+            UUID entityId,
+            boolean untilDead,
+            int maxHits,
+            boolean sprint,
+            int timeoutTicks
+    ) {
+        Entity entity = resolveEntity(player, entityId);
+        if (entity == null) {
+            return ToolResult.error("Entity not found: " + entityId);
+        }
+        if (entity == player) {
+            return ToolResult.error("Cannot engage self");
+        }
+        if (!entity.isAlive()) {
+            return ToolResult.error("Entity is not alive");
+        }
+        if (!entity.isAttackable() || entity.skipAttackInteraction(player)) {
+            return ToolResult.error("Entity is not attackable");
+        }
+        Vec3 aim = aimPoint(entity);
+        if (!withinActionRadius(player, aim.x, aim.y, aim.z)) {
+            return ToolResult.error("Entity outside allowed action radius");
+        }
+
+        int cappedHits = maxHits <= 0 ? Integer.MAX_VALUE : Math.max(1, maxHits);
+        int maxTicks = timeoutTicks > 0
+                ? timeoutTicks
+                : TheseusServerConfig.ENGAGE_MAX_TICKS.getAsInt();
+        CombatTask task = new CombatTask(entityId, untilDead, cappedHits, sprint, maxTicks);
+        engages.put(player.getUUID(), task);
+        // Seed follow + focus immediately.
+        double standoff = defaultMeleeStandoff(player);
+        moves.put(player.getUUID(), MoveTask.follow(
+                entityId, entity.getX(), entity.getY(), entity.getZ(), sprint, true, standoff, player.position()));
+        focuses.put(player.getUUID(), FocusLock.entity(entityId));
+        lastCombatStatus.put(player.getUUID(), CombatStatus.active(task));
+        lastNavStatus.put(player.getUUID(), NavStatus.active(moves.get(player.getUUID())));
+
+        JsonObject data = new JsonObject();
+        data.addProperty("entity_uuid", entityId.toString());
+        data.addProperty("until_dead", untilDead);
+        data.addProperty("max_hits", cappedHits == Integer.MAX_VALUE ? -1 : cappedHits);
+        data.addProperty("timeout_ticks", maxTicks);
+        data.addProperty("sprint", sprint);
+        data.addProperty("standoff", standoff);
+        return ToolResult.ok("Engaging " + entity.getName().getString()
+                + (untilDead ? " until defeated" : " (max_hits=" + cappedHits + ")"), data);
     }
 
     /** Absolute yaw/pitch look. Clears any active focus lock. */
@@ -165,6 +321,96 @@ public final class PlayerController {
         boolean removed = player.gameMode.destroyBlock(pos);
         return removed ? ToolResult.ok("Broke block at " + pos.toShortString())
                 : ToolResult.error("Could not break block at " + pos.toShortString());
+    }
+
+    /**
+     * Melee-attack an entity with the player's current held item (vanilla attack path).
+     *
+     * @param lookAt when true, face the target before swinging
+     * @param force  when true, attack even if the attack-strength cooldown is not ready
+     */
+    public ToolResult attackEntity(ServerPlayer player, UUID entityId, boolean lookAt, boolean force) {
+        Entity entity = resolveEntity(player, entityId);
+        if (entity == null) {
+            return ToolResult.error("Entity not found: " + entityId);
+        }
+        if (entity == player) {
+            return ToolResult.error("Cannot attack self");
+        }
+        if (!entity.isAlive()) {
+            return ToolResult.error("Entity is not alive");
+        }
+        if (!entity.isAttackable() || entity.skipAttackInteraction(player)) {
+            return ToolResult.error("Entity is not attackable");
+        }
+
+        Vec3 aim = aimPoint(entity);
+        if (!withinActionRadius(player, aim.x, aim.y, aim.z)) {
+            return ToolResult.error("Entity outside allowed action radius");
+        }
+
+        double reach = player.entityInteractionRange();
+        // Padding mirrors vanilla interact tolerance for large hitboxes / edge grazes.
+        if (!player.canInteractWithEntity(entity, 1.0D)) {
+            JsonObject far = new JsonObject();
+            far.addProperty("entity_uuid", entityId.toString());
+            far.addProperty("distance", player.distanceTo(entity));
+            far.addProperty("reach", reach);
+            far.addProperty("in_reach", false);
+            far.addProperty("x", entity.getX());
+            far.addProperty("y", entity.getY());
+            far.addProperty("z", entity.getZ());
+            far.addProperty("suggestion",
+                    "Use player_goto with entity_uuid, or player_engage, to close distance before attacking");
+            return ToolResult.error("Target out of melee reach (distance="
+                    + String.format(Locale.ROOT, "%.2f", player.distanceTo(entity))
+                    + ", reach=" + String.format(Locale.ROOT, "%.2f", reach) + ")", far);
+        }
+
+        float strength = player.getAttackStrengthScale(0.5F);
+        if (!force && strength < 0.9F) {
+            JsonObject cool = new JsonObject();
+            cool.addProperty("entity_uuid", entityId.toString());
+            cool.addProperty("attack_strength", strength);
+            cool.addProperty("cooldown_ready", false);
+            return ToolResult.error("Attack cooldown not ready (strength="
+                    + String.format(Locale.ROOT, "%.2f", strength)
+                    + "). Wait a moment, or pass force=true.", cool);
+        }
+
+        if (lookAt) {
+            float[] yp = yawPitchToward(player, aim);
+            applyLook(player, yp[0], yp[1], true);
+        }
+
+        float healthBefore = entity instanceof LivingEntity living ? living.getHealth() : -1F;
+        player.attack(entity);
+        player.swing(InteractionHand.MAIN_HAND, true);
+
+        JsonObject data = new JsonObject();
+        data.addProperty("entity_uuid", entityId.toString());
+        data.addProperty("type", BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString());
+        data.addProperty("name", entity.getName().getString());
+        data.addProperty("distance", player.distanceTo(entity));
+        data.addProperty("reach", reach);
+        data.addProperty("attack_strength", strength);
+        data.addProperty("look_at", lookAt);
+        data.addProperty("force", force);
+        data.addProperty("alive", entity.isAlive());
+        if (entity instanceof LivingEntity livingAfter) {
+            data.addProperty("health_before", healthBefore);
+            data.addProperty("health", livingAfter.getHealth());
+            data.addProperty("max_health", livingAfter.getMaxHealth());
+        }
+        ItemStack held = player.getMainHandItem();
+        if (!held.isEmpty()) {
+            data.addProperty("held_item", BuiltInRegistries.ITEM.getKey(held.getItem()).toString());
+        }
+
+        String msg = entity.isAlive()
+                ? "Attacked " + entity.getName().getString()
+                : "Attacked and defeated " + entity.getName().getString();
+        return ToolResult.ok(msg, data);
     }
 
     public ToolResult placeBlock(ServerPlayer player, BlockPos placePos) {
@@ -446,27 +692,146 @@ public final class PlayerController {
     }
 
     public void onServerTick(ServerTickEvent.Post event) {
+        tickEngages(event);
         tickMoves(event);
         tickFocuses(event);
+    }
+
+    private void tickEngages(ServerTickEvent.Post event) {
+        Iterator<Map.Entry<UUID, CombatTask>> it = engages.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<UUID, CombatTask> entry = it.next();
+            UUID playerId = entry.getKey();
+            ServerPlayer player = event.getServer().getPlayerList().getPlayer(playerId);
+            CombatTask task = entry.getValue();
+            if (player == null) {
+                it.remove();
+                moves.remove(playerId);
+                focuses.remove(playerId);
+                continue;
+            }
+            task.ticks++;
+            if (task.ticks > task.maxTicks) {
+                finishEngage(playerId, task, EndReason.TIMEOUT, null);
+                it.remove();
+                moves.remove(playerId);
+                player.setSprinting(false);
+                continue;
+            }
+
+            Entity target = resolveEntity(player, task.targetId);
+            if (target == null) {
+                finishEngage(playerId, task, EndReason.TARGET_LOST, null);
+                it.remove();
+                moves.remove(playerId);
+                player.setSprinting(false);
+                continue;
+            }
+            if (!target.isAlive()) {
+                finishEngage(playerId, task, EndReason.DEFEATED, target);
+                it.remove();
+                moves.remove(playerId);
+                player.setSprinting(false);
+                continue;
+            }
+
+            focuses.put(playerId, FocusLock.entity(task.targetId));
+
+            boolean inReach = player.canInteractWithEntity(target, 1.0D);
+            if (!inReach) {
+                // Keep / refresh chase while out of reach.
+                double standoff = defaultMeleeStandoff(player);
+                MoveTask existing = moves.get(playerId);
+                if (existing == null || existing.followEntity == null
+                        || !task.targetId.equals(existing.followEntity)) {
+                    moves.put(playerId, MoveTask.follow(
+                            task.targetId,
+                            target.getX(),
+                            target.getY(),
+                            target.getZ(),
+                            task.sprint,
+                            true,
+                            standoff,
+                            player.position()));
+                }
+                lastCombatStatus.put(playerId, CombatStatus.active(task));
+                continue;
+            }
+
+            // In reach: pause chase so we don't push through the target.
+            moves.remove(playerId);
+
+            float strength = player.getAttackStrengthScale(0.5F);
+            if (strength < 0.9F) {
+                lastCombatStatus.put(playerId, CombatStatus.active(task));
+                continue;
+            }
+
+            float healthBefore = target instanceof LivingEntity living ? living.getHealth() : -1F;
+            ToolResult hit = attackEntity(player, task.targetId, true, false);
+            if (hit.success()) {
+                task.hits++;
+                if (healthBefore >= 0 && target instanceof LivingEntity livingAfter) {
+                    task.damageDealt += Math.max(0F, healthBefore - livingAfter.getHealth());
+                }
+            }
+
+            if (!target.isAlive()) {
+                finishEngage(playerId, task, EndReason.DEFEATED, target);
+                it.remove();
+                player.setSprinting(false);
+                continue;
+            }
+            if (!task.untilDead && task.hits >= task.maxHits) {
+                finishEngage(playerId, task, EndReason.MAX_HITS, target);
+                it.remove();
+                player.setSprinting(false);
+                continue;
+            }
+            lastCombatStatus.put(playerId, CombatStatus.active(task));
+        }
     }
 
     private void tickMoves(ServerTickEvent.Post event) {
         Iterator<Map.Entry<UUID, MoveTask>> it = moves.entrySet().iterator();
         while (it.hasNext()) {
             Map.Entry<UUID, MoveTask> entry = it.next();
-            ServerPlayer player = event.getServer().getPlayerList().getPlayer(entry.getKey());
+            UUID playerId = entry.getKey();
+            ServerPlayer player = event.getServer().getPlayerList().getPlayer(playerId);
             if (player == null) {
                 it.remove();
-                focuses.remove(entry.getKey());
+                focuses.remove(playerId);
                 continue;
             }
-            // While focus-locked, still move but leave look to focus tick.
-            boolean focusLocked = focuses.containsKey(entry.getKey());
+            boolean focusLocked = focuses.containsKey(playerId);
             MoveTask task = entry.getValue();
             task.ticks++;
-            if (task.ticks > MAX_GOTO_TICKS) {
+
+            int maxTicks = TheseusServerConfig.MAX_GOTO_TICKS.getAsInt();
+            if (task.ticks > maxTicks) {
+                finishMove(playerId, task, EndReason.TIMEOUT);
                 it.remove();
+                player.setSprinting(false);
                 continue;
+            }
+
+            if (task.followEntity != null) {
+                Entity follow = resolveEntity(player, task.followEntity);
+                if (follow == null) {
+                    finishMove(playerId, task, EndReason.TARGET_LOST);
+                    it.remove();
+                    player.setSprinting(false);
+                    continue;
+                }
+                if (!follow.isAlive()) {
+                    finishMove(playerId, task, EndReason.TARGET_DEAD);
+                    it.remove();
+                    player.setSprinting(false);
+                    continue;
+                }
+                task.x = follow.getX();
+                task.y = follow.getY();
+                task.z = follow.getZ();
             }
 
             Vec3 target = new Vec3(task.x, task.y, task.z);
@@ -474,9 +839,42 @@ public final class PlayerController {
             Vec3 delta = target.subtract(pos);
             double horiz = delta.horizontalDistance();
             double vert = Math.abs(delta.y);
-            double arrive = task.navigate ? 0.75 : 0.4;
-            if (horiz < arrive && (!task.navigate || vert < 1.5)) {
+            double arrive = task.standoff;
+            boolean arrived = horiz < arrive && (!task.navigate || task.followEntity != null || vert < 1.5);
+            if (arrived) {
+                // For entity follow used by engage, leave the move in place only if engage still needs chase;
+                // point/follow completion removes the task.
+                if (task.followEntity != null && engages.containsKey(playerId)) {
+                    // Engage owns completion; stay parked near target without finishing as ARRIVED.
+                    player.setSprinting(false);
+                    lastNavStatus.put(playerId, NavStatus.active(task));
+                    continue;
+                }
+                finishMove(playerId, task, EndReason.ARRIVED);
                 it.remove();
+                player.setSprinting(false);
+                continue;
+            }
+
+            // Stuck detection: little horizontal progress while still far from goal.
+            double progressSqr = pos.multiply(1, 0, 1).distanceToSqr(task.lastProgressPos.multiply(1, 0, 1));
+            if (progressSqr < STUCK_EPSILON_SQR) {
+                task.stuckTicks++;
+            } else {
+                task.stuckTicks = 0;
+                task.lastProgressPos = pos;
+            }
+            if (task.stuckTicks >= TheseusServerConfig.NAV_STUCK_TICKS.getAsInt()) {
+                finishMove(playerId, task, EndReason.STUCK);
+                it.remove();
+                player.setSprinting(false);
+                // If engage was chasing and got stuck, end engage too.
+                if (engages.containsKey(playerId)) {
+                    CombatTask combat = engages.remove(playerId);
+                    if (combat != null) {
+                        finishEngage(playerId, combat, EndReason.STUCK, null);
+                    }
+                }
                 continue;
             }
 
@@ -484,7 +882,11 @@ public final class PlayerController {
             if (flat.lengthSqr() < 1.0E-6) {
                 flat = new Vec3(0, 0, 1);
             }
-            Vec3 dir = flat.normalize().scale(task.sprint ? 0.28 : 0.18);
+            double speed = task.sprint
+                    ? TheseusServerConfig.NAV_SPRINT_SPEED.getAsDouble()
+                    : TheseusServerConfig.NAV_WALK_SPEED.getAsDouble();
+            Vec3 dir = flat.normalize().scale(speed);
+            player.setSprinting(task.sprint);
             player.setDeltaMovement(dir.x, player.getDeltaMovement().y, dir.z);
             player.hurtMarked = true;
 
@@ -500,8 +902,9 @@ public final class PlayerController {
             }
 
             if (task.navigate) {
-                maybeStepOrJump(player, dir, delta.y);
+                maybeStepOrJump(player, dir);
             }
+            lastNavStatus.put(playerId, NavStatus.active(task));
         }
     }
 
@@ -523,6 +926,28 @@ public final class PlayerController {
             float[] yp = look.get();
             applyLook(player, yp[0], yp[1], true);
         }
+    }
+
+    private void finishMove(UUID playerId, MoveTask task, EndReason reason) {
+        lastNavStatus.put(playerId, NavStatus.finished(reason, task.ticks, task.followEntity, task.x, task.y, task.z));
+    }
+
+    private void finishEngage(UUID playerId, CombatTask task, EndReason reason, Entity target) {
+        lastCombatStatus.put(playerId, CombatStatus.finished(task, reason, target));
+    }
+
+    private boolean clearEngage(UUID playerId, EndReason reason) {
+        CombatTask task = engages.remove(playerId);
+        if (task == null) {
+            return false;
+        }
+        lastCombatStatus.put(playerId, CombatStatus.finished(task, reason, null));
+        return true;
+    }
+
+    private static double defaultMeleeStandoff(ServerPlayer player) {
+        // Stop slightly inside interaction range so the next swing succeeds.
+        return Math.max(1.5, player.entityInteractionRange() - 0.75);
     }
 
     private static Optional<float[]> resolveFocusLook(ServerPlayer player, FocusLock lock) {
@@ -599,47 +1024,215 @@ public final class PlayerController {
         return data;
     }
 
-    private static void maybeStepOrJump(ServerPlayer player, Vec3 dir, double deltaY) {
+    /**
+     * Jump only when the primary axis ahead is blocked and headroom allows a 1-block step-up.
+     * Avoids blind jumps on {@code needClimb} without clearance.
+     */
+    private static void maybeStepOrJump(ServerPlayer player, Vec3 dir) {
         if (!player.onGround()) {
             return;
         }
         Level level = player.level();
         BlockPos feet = player.blockPosition();
-        BlockPos ahead = feet.offset(
-                (int) Math.signum(dir.x == 0 ? 0 : dir.x),
-                0,
-                (int) Math.signum(dir.z == 0 ? 0 : dir.z)
-        );
+        int sx = Math.abs(dir.x) >= Math.abs(dir.z) ? (dir.x < 0 ? -1 : 1) : 0;
+        int sz = Math.abs(dir.z) > Math.abs(dir.x) ? (dir.z < 0 ? -1 : 1) : 0;
+        if (sx == 0 && sz == 0) {
+            Direction facing = player.getDirection();
+            sx = facing.getStepX();
+            sz = facing.getStepZ();
+        }
+        BlockPos ahead = feet.offset(sx, 0, sz);
         if (ahead.equals(feet)) {
-            ahead = feet.relative(player.getDirection());
+            return;
         }
 
-        boolean bodyBlocked = !level.getBlockState(ahead).getCollisionShape(level, ahead).isEmpty()
-                || !level.getBlockState(ahead.above()).getCollisionShape(level, ahead.above()).isEmpty();
-        boolean stepUpClear = level.getBlockState(ahead.above()).getCollisionShape(level, ahead.above()).isEmpty()
-                && level.getBlockState(ahead.above(2)).getCollisionShape(level, ahead.above(2)).isEmpty();
-        boolean needClimb = deltaY > 0.6;
-
-        if ((bodyBlocked && stepUpClear) || needClimb) {
+        boolean feetBlocked = !level.getBlockState(ahead).getCollisionShape(level, ahead).isEmpty();
+        boolean bodyClear = level.getBlockState(ahead.above()).getCollisionShape(level, ahead.above()).isEmpty();
+        boolean headClear = level.getBlockState(ahead.above(2)).getCollisionShape(level, ahead.above(2)).isEmpty();
+        // 1-high step only: solid at feet, clear at body + head. No blind climb jumps.
+        if (feetBlocked && bodyClear && headClear) {
             player.jumpFromGround();
         }
     }
 
+    enum EndReason {
+        ARRIVED, TIMEOUT, STUCK, CANCELLED, TARGET_LOST, TARGET_DEAD, DEFEATED, MAX_HITS
+    }
+
     private static final class MoveTask {
-        private final double x;
-        private final double y;
-        private final double z;
+        private double x;
+        private double y;
+        private double z;
+        private final UUID followEntity;
         private final boolean sprint;
         private final boolean navigate;
+        private final double standoff;
         private int ticks;
+        private int stuckTicks;
+        private Vec3 lastProgressPos;
 
-        private MoveTask(double x, double y, double z, boolean sprint, boolean navigate, int ticks) {
+        private MoveTask(
+                double x,
+                double y,
+                double z,
+                UUID followEntity,
+                boolean sprint,
+                boolean navigate,
+                double standoff,
+                Vec3 lastProgressPos
+        ) {
             this.x = x;
             this.y = y;
             this.z = z;
+            this.followEntity = followEntity;
             this.sprint = sprint;
             this.navigate = navigate;
-            this.ticks = ticks;
+            this.standoff = standoff;
+            this.ticks = 0;
+            this.stuckTicks = 0;
+            this.lastProgressPos = lastProgressPos;
+        }
+
+        private static MoveTask point(
+                double x, double y, double z, boolean sprint, boolean navigate, double standoff, Vec3 from
+        ) {
+            return new MoveTask(x, y, z, null, sprint, navigate, standoff, from);
+        }
+
+        private static MoveTask follow(
+                UUID entityId, double x, double y, double z, boolean sprint, boolean navigate, double standoff, Vec3 from
+        ) {
+            return new MoveTask(x, y, z, entityId, sprint, navigate, standoff, from);
+        }
+
+        private JsonObject toJson(boolean active) {
+            JsonObject o = new JsonObject();
+            o.addProperty("active", active);
+            o.addProperty("mode", followEntity != null ? "follow" : "point");
+            o.addProperty("x", x);
+            o.addProperty("y", y);
+            o.addProperty("z", z);
+            o.addProperty("standoff", standoff);
+            o.addProperty("sprint", sprint);
+            o.addProperty("navigate", navigate);
+            o.addProperty("ticks", ticks);
+            o.addProperty("stuck_ticks", stuckTicks);
+            if (followEntity != null) {
+                o.addProperty("entity_uuid", followEntity.toString());
+            }
+            return o;
+        }
+    }
+
+    private static final class CombatTask {
+        private final UUID targetId;
+        private final boolean untilDead;
+        private final int maxHits;
+        private final boolean sprint;
+        private final int maxTicks;
+        private int ticks;
+        private int hits;
+        private float damageDealt;
+
+        private CombatTask(UUID targetId, boolean untilDead, int maxHits, boolean sprint, int maxTicks) {
+            this.targetId = targetId;
+            this.untilDead = untilDead;
+            this.maxHits = maxHits;
+            this.sprint = sprint;
+            this.maxTicks = maxTicks;
+        }
+
+        private JsonObject toJson(boolean active) {
+            JsonObject o = new JsonObject();
+            o.addProperty("active", active);
+            o.addProperty("entity_uuid", targetId.toString());
+            o.addProperty("until_dead", untilDead);
+            o.addProperty("max_hits", maxHits == Integer.MAX_VALUE ? -1 : maxHits);
+            o.addProperty("hits", hits);
+            o.addProperty("damage_dealt", damageDealt);
+            o.addProperty("ticks", ticks);
+            o.addProperty("max_ticks", maxTicks);
+            o.addProperty("sprint", sprint);
+            return o;
+        }
+    }
+
+    private record NavStatus(
+            boolean active,
+            EndReason reason,
+            int ticks,
+            String mode,
+            UUID entityId,
+            double x,
+            double y,
+            double z
+    ) {
+        private static NavStatus active(MoveTask task) {
+            return new NavStatus(
+                    true, null, task.ticks,
+                    task.followEntity != null ? "follow" : "point",
+                    task.followEntity, task.x, task.y, task.z);
+        }
+
+        private static NavStatus finished(
+                EndReason reason, int ticks, UUID entityId, double x, double y, double z
+        ) {
+            return new NavStatus(
+                    false, reason, ticks,
+                    entityId != null ? "follow" : "point",
+                    entityId, x, y, z);
+        }
+
+        private JsonObject toJson() {
+            JsonObject o = new JsonObject();
+            o.addProperty("active", active);
+            if (reason != null) {
+                o.addProperty("end_reason", reason.name());
+            }
+            o.addProperty("ticks", ticks);
+            o.addProperty("mode", mode);
+            o.addProperty("x", x);
+            o.addProperty("y", y);
+            o.addProperty("z", z);
+            if (entityId != null) {
+                o.addProperty("entity_uuid", entityId.toString());
+            }
+            return o;
+        }
+    }
+
+    private record CombatStatus(
+            boolean active,
+            EndReason reason,
+            UUID targetId,
+            int hits,
+            float damageDealt,
+            int ticks,
+            Boolean targetAlive
+    ) {
+        private static CombatStatus active(CombatTask task) {
+            return new CombatStatus(true, null, task.targetId, task.hits, task.damageDealt, task.ticks, true);
+        }
+
+        private static CombatStatus finished(CombatTask task, EndReason reason, Entity target) {
+            Boolean alive = target == null ? null : target.isAlive();
+            return new CombatStatus(false, reason, task.targetId, task.hits, task.damageDealt, task.ticks, alive);
+        }
+
+        private JsonObject toJson() {
+            JsonObject o = new JsonObject();
+            o.addProperty("active", active);
+            if (reason != null) {
+                o.addProperty("end_reason", reason.name());
+            }
+            o.addProperty("entity_uuid", targetId.toString());
+            o.addProperty("hits", hits);
+            o.addProperty("damage_dealt", damageDealt);
+            o.addProperty("ticks", ticks);
+            if (targetAlive != null) {
+                o.addProperty("target_alive", targetAlive);
+            }
+            return o;
         }
     }
 
